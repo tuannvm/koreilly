@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -31,33 +32,35 @@ func Run() error {
 	// Initialize configuration
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Set up logger
 	setupLogger(cfg)
 
-
-	// Initialize services
-	authSvc, err := auth.NewService(cfg)
-	if err != nil {
-		return err
-	}
+	// Initialize authentication service
+	authSvc := auth.NewService(cfg)
 
 	// Initialize TUI
 	ui, err := tui.NewApp(cfg, authSvc)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to initialize TUI: %w", err)
 	}
 
+	log.Println("Starting GOReily...")
+
 	// Run the application
-	return ui.Run(ctx)
+	if err := ui.Run(ctx); err != nil {
+		return fmt.Errorf("application error: %w", err)
+	}
+
+	return nil
 }
 
 func setupLogger(cfg *config.Config) {
 	// Configure standard logger
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetPrefix("koreilly: ")
+	log.SetPrefix("goreilly: ")
 
 	// In debug mode, we'll log more verbosely
 	if !cfg.Debug {

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -10,13 +11,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Client is a custom HTTP client with retry and rate limiting
-// capabilities for interacting with the O'Reilly API.
+// Client is an HTTP client with retry and rate limiting capabilities for interacting with the O'Reilly API.
 type Client struct {
 	client      *http.Client
 	baseURL     string
 	rateLimiter *rate.Limiter
 	retryPolicy RetryPolicy
+	headers     map[string]string
 }
 
 // RetryPolicy defines the retry behavior for failed requests
@@ -38,10 +39,17 @@ func DefaultRetryPolicy() RetryPolicy {
 // New creates a new HTTP client with the specified configuration
 func New(baseURL string, opts ...Option) *Client {
 	c := &Client{
-		client:      &http.Client{Timeout: 30 * time.Second},
-		baseURL:     baseURL,
+		baseURL: baseURL,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 		rateLimiter: rate.NewLimiter(rate.Every(time.Second), 10), // 10 requests per second
 		retryPolicy: DefaultRetryPolicy(),
+		headers: map[string]string{
+			"User-Agent":   "Goreilly CLI",
+			"Content-Type": "application/json",
+			"Accept":       "application/json",
+		},
 	}
 
 	for _, opt := range opts {
@@ -82,17 +90,41 @@ func (c *Client) Get(ctx context.Context, path string) (*http.Response, error) {
 		return nil, err
 	}
 
+	// Set default headers
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
 	return c.doWithRetry(req)
 }
 
-// Post performs an HTTP POST request with retries
+// Post sends a POST request with retry and rate limiting
 func (c *Client) Post(ctx context.Context, path, contentType string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
+	headers := map[string]string{
+		"Content-Type": contentType,
+	}
+	return c.PostWithHeaders(ctx, path, headers, body)
+}
+
+// PostWithHeaders sends a POST request with custom headers and retry logic
+func (c *Client) PostWithHeaders(ctx context.Context, path string, headers map[string]string, body io.Reader) (*http.Response, error) {
+	url := c.baseURL + path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", contentType)
+	// Set default headers
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	// Add/override with provided headers
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
 	return c.doWithRetry(req)
 }
 

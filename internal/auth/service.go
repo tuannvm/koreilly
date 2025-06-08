@@ -3,58 +3,65 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tuannvm/goreilly/internal/config"
+	"github.com/tuannvm/goreilly/internal/services/oreilly"
 )
 
 type Service struct {
-	config *config.Config
+	config  *config.Config
+	oreilly *oreilly.Service
 }
 
-// Token represents the authentication token
-// This is a placeholder - update with actual O'Reilly token structure
-// based on their API documentation
-//
-// Example:
-// type Token struct {
-// 	AccessToken string `json:"access_token"`
-// 	TokenType   string `json:"token_type"`
-// 	ExpiresIn   int    `json:"expires_in"`
-// }
+// Token represents the O'Reilly authentication token
 type Token struct {
-	APIKey string `json:"api_key"`
+	AccessToken string    `json:"access_token"`
+	TokenType   string    `json:"token_type"`
+	ExpiresIn   int       `json:"expires_in"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // NewService creates a new authentication service
-func NewService(cfg *config.Config) (*Service, error) {
+func NewService(cfg *config.Config) *Service {
 	return &Service{
-		config: cfg,
-	}, nil
+		config:  cfg,
+		oreilly: oreilly.NewService(),
+	}
 }
 
-// Authenticate authenticates with O'Reilly API using the provided API key
-func (s *Service) Authenticate(ctx context.Context, apiKey string) (*Token, error) {
-	// TODO: Implement actual O'Reilly API authentication
-	// This is a placeholder that just validates the key is not empty
-	if apiKey == "" {
-		return nil, ErrInvalidToken
+// Authenticate authenticates with O'Reilly API using username and password
+func (s *Service) Authenticate(ctx context.Context, username, password string) (*Token, error) {
+	if username == "" || password == "" {
+		return nil, ErrInvalidCredentials
 	}
 
+	// Call the O'Reilly service to authenticate
+	resp, err := s.oreilly.Login(ctx, username, password)
+	if err != nil {
+		return nil, fmt.Errorf("authentication failed: %w", err)
+	}
+
+	// Create a new token with expiration
 	token := &Token{
-		APIKey: apiKey,
+		AccessToken: resp.AccessToken,
+		TokenType:   resp.TokenType,
+		ExpiresIn:   resp.ExpiresIn,
+		ExpiresAt:  time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second),
 	}
 
 	// Save the token
 	if err := s.saveToken(token); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to save token: %w", err)
 	}
 
-	// Update config
-	s.config.APIKey = apiKey
+	// Update config with username (don't save password for security)
+	s.config.Username = username
 	if err := s.config.Save(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to save config: %w", err)
 	}
 
 	return token, nil
@@ -135,6 +142,7 @@ func (s *Service) tokenPath() (string, error) {
 var (
 	ErrNotAuthenticated = NewAuthError("not authenticated")
 	ErrInvalidToken    = NewAuthError("invalid token")
+	ErrInvalidCredentials = NewAuthError("invalid username or password")
 )
 
 type AuthError struct {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -8,9 +9,10 @@ import (
 )
 
 type Config struct {
+	Username  string `mapstructure:"username"`
+	Password  string `mapstructure:"password"`
 	Debug     bool   `mapstructure:"debug"`
 	LogLevel  string `mapstructure:"log_level"`
-	APIKey    string `mapstructure:"api_key"`
 	OutputDir string `mapstructure:"output_dir"`
 	Gmail     struct {
 		Email    string `mapstructure:"email"`
@@ -23,65 +25,60 @@ type Config struct {
 
 // Load loads the configuration from file and environment variables
 func Load() (*Config, error) {
+	c := &Config{}
+
 	// Set default values
+	c.Debug = false
+	c.LogLevel = "info"
+	c.OutputDir = "books"
+
+	// Bind environment variables with GOREILLY_ prefix
+	viper.SetEnvPrefix("GOREILLY")
+	viper.AutomaticEnv()
+
+	// Set default values in viper
 	viper.SetDefault("debug", false)
 	viper.SetDefault("log_level", "info")
 	viper.SetDefault("output_dir", "books")
 
 	// Read from config file if exists
-	const (
-		DefaultConfigDir  = ".config/goreilly"
-		DefaultConfigFile = "config.yaml"
-	)
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	appDir := filepath.Join(configDir, "koreilly")
-	if err := os.MkdirAll(appDir, 0755); err != nil {
-		return nil, err
+	configPath := filepath.Join(configDir, "goreilly", "config.yaml")
+	viper.SetConfigFile(configPath)
+
+	if err := viper.ReadInConfig(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
 	}
 
-	viper.AddConfigPath(appDir)
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-
-	// Ignore if config file doesn't exist
-	_ = viper.ReadInConfig()
-
-	// Read from environment variables
-	viper.SetEnvPrefix("KOREILLY")
-	viper.AutomaticEnv()
-
-	// Bind environment variables
-	viper.BindEnv("api_key", "KOREILLY_API_KEY")
-	viper.BindEnv("gmail.email", "KOREILLY_GMAIL_EMAIL")
-	viper.BindEnv("gmail.password", "KOREILLY_GMAIL_PASSWORD")
-	viper.BindEnv("kindle.email", "KOREILLY_KINDLE_EMAIL")
-
-	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, err
+	// Unmarshal config
+	if err := viper.Unmarshal(c); err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
-	return &cfg, nil
+	return c, nil
 }
 
 // Save saves the configuration to file
 func (c *Config) Save() error {
-	viper.Set("api_key", c.APIKey)
+	viper.Set("username", c.Username)
+	viper.Set("password", c.Password)
 	viper.Set("gmail.email", c.Gmail.Email)
 	viper.Set("kindle.email", c.Kindle.Email)
 
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get config directory: %w", err)
 	}
 
-	appDir := filepath.Join(configDir, "koreilly")
+	appDir := filepath.Join(configDir, "goreilly")
 	if err := os.MkdirAll(appDir, 0755); err != nil {
-		return err
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	configFile := filepath.Join(appDir, "config.yaml")
