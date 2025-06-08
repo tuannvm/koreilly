@@ -21,14 +21,13 @@ Based on the original repository, the current tool provides:
 ### Core Components
 
 1. **Authentication Module** (`auth/`)
-   - API token authentication
-   - Token validation and management
+   - API key authentication (just enter the O'Reilly API token)
    - Secure token storage using native `encoding/json`
 
 2. **API Client** (`client/`)
    - Native `net/http` client with retry logic
    - Rate limiting using `golang.org/x/time/rate`
-   - Bearer token authentication
+   - Bearer token (API key) authentication
    - Proxy support
    - Request/response handling
 
@@ -44,17 +43,16 @@ Based on the original repository, the current tool provides:
    - Navigation document creation
    - Content organization
 
-5. **Gmail Service** (`gmail/`)
-   - Gmail OAuth2 authentication with environment detection
-   - Email composition with EPUB attachments
-   - Kindle email delivery support
-   - Multiple authentication methods (OAuth2 browser, manual, app password)
+5. **Gmail Delivery Service** (`gmail/`)
+   - Gmail-based delivery to Kindle devices via "Send to Kindle" email service
+   - Gmail SMTP integration with app password authentication for sending EPUBs
+   - Email delivery status and error reporting
 
 6. **TUI Interface** (`tui/`)
    - Bubble Tea based terminal user interface
    - Interactive book selection and download progress
    - Real-time status updates
-   - Gmail configuration and email delivery confirmation
+   - Gmail delivery configuration and confirmation
 
 7. **Configuration** (`config/`)
    - Native environment variable handling
@@ -71,57 +69,87 @@ koreilly/
 ├── internal/
 │   ├── auth/
 │   │   ├── auth.go
-│   │   └── token.go
+│   │   ├── token.go
+│   │   └── storage.go          # Secure token storage
 │   ├── client/
 │   │   ├── client.go
 │   │   ├── retry.go
-│   │   └── ratelimit.go
-│   ├── book/
-│   │   ├── book.go
-│   │   ├── metadata.go
-│   │   ├── chapter.go
-│   │   └── assets.go
-│   ├── epub/
-│   │   ├── epub.go
-│   │   ├── generator.go
-│   │   └── templates.go
-│   ├── gmail/
-│   │   ├── gmail.go
-│   │   ├── oauth2.go
-│   │   ├── environment.go
-│   │   └── templates.go
+│   │   ├── ratelimit.go
+│   │   └── middleware.go       # Request/response middleware
+│   ├── services/               # Business logic layer
+│   │   ├── book/
+│   │   │   ├── service.go
+│   │   │   ├── metadata.go
+│   │   │   ├── chapter.go
+│   │   │   └── assets.go
+│   │   ├── epub/
+│   │   │   ├── builder.go
+│   │   │   ├── generator.go
+│   │   │   └── templates.go
+│   │   └── delivery/
+│   │       ├── gmail.go
+│   │       ├── smtp.go
+│   │       └── validator.go    # Email validation
 │   ├── tui/
 │   │   ├── app.go
+│   │   ├── state.go            # Application state management
 │   │   ├── models/
 │   │   │   ├── auth.go
-│   │   │   ├── download.go
 │   │   │   ├── search.go
-│   │   ├── settings.go
-│   │   └── gmail.go
-│   │   ├── views/
-│   │   │   ├── auth.go
 │   │   │   ├── download.go
-│   │   │   ├── search.go
 │   │   │   ├── settings.go
 │   │   │   └── gmail.go
-│   │   └── components/
-│   │       ├── progress.go
-│   │       ├── table.go
-│   │       └── form.go
+│   │   ├── views/
+│   │   │   ├── auth.go
+│   │   │   ├── search.go
+│   │   │   ├── download.go
+│   │   │   ├── settings.go
+│   │   │   └── gmail.go
+│   │   ├── components/
+│   │   │   ├── progress.go
+│   │   │   ├── table.go
+│   │   │   ├── form.go
+│   │   │   └── notification.go # Toast notifications
+│   │   └── styles/
+│   │       ├── theme.go
+│   │       └── colors.go
 │   ├── config/
-│   │   └── config.go
+│   │   ├── config.go
+│   │   ├── defaults.go         # Default configuration values
+│   │   └── validation.go       # Config validation
 │   └── utils/
 │       ├── filesystem.go
 │       ├── html.go
-│       └── validation.go
+│       ├── validation.go
+│       └── logger.go           # Structured logging
 ├── pkg/
-│   └── models/
-│       ├── book.go
-│       ├── chapter.go
-│       └── gmail.go
+│   ├── models/
+│   │   ├── book.go
+│   │   ├── chapter.go
+│   │   ├── asset.go
+│   │   ├── config.go
+│   │   └── delivery.go         # Email delivery models
+│   └── errors/
+│       ├── errors.go           # Custom error types
+│       └── codes.go            # Error codes
+├── assets/                     # Embedded assets
+│   ├── templates/
+│   │   ├── epub/
+│   │   └── email/
+│   └── styles/
+│       └── kindle.css
 ├── docs/
+│   ├── api.md                  # O'Reilly API documentation
+│   ├── setup.md               # Setup guide
+│   └── troubleshooting.md
 ├── scripts/
+│   ├── build.sh
+│   ├── test.sh
+│   └── release.sh
 ├── testdata/
+│   ├── books/                  # Sample book data
+│   ├── responses/              # Mock API responses
+│   └── configs/                # Test configurations
 ├── go.mod
 ├── go.sum
 ├── Makefile
@@ -142,33 +170,43 @@ koreilly/
 
 #### 1.2 Configuration Management (Native)
 ```go
-type Config struct {
-    APIToken        string        `json:"api_token"`
-    OutputDir       string        `json:"output_dir"`
-    KindleMode      bool          `json:"kindle_mode"`
-    PreserveLog     bool          `json:"preserve_log"`
-    ProxyURL        string        `json:"proxy_url"`
-    UserAgent       string        `json:"user_agent"`
-    MaxRetries      int           `json:"max_retries"`
-    RequestDelay    time.Duration `json:"request_delay"`
-    MaxConcurrent   int           `json:"max_concurrent"`
-    GmailConfig     EmailConfig   `json:"gmail_config"`
+type BookConfig struct {
+    APIToken        string          `json:"api_token"`
+    OutputDir       string          `json:"output_dir"`
+    KindleMode      bool            `json:"kindle_mode"`
+    PreserveLog     bool            `json:"preserve_log"`
+    ProxyURL        string          `json:"proxy_url"`
+    UserAgent       string          `json:"user_agent"`
+    MaxRetries      int             `json:"max_retries"`
+    RequestDelay    time.Duration   `json:"request_delay"`
+    MaxConcurrent   int             `json:"max_concurrent"`
+    EmailDelivery   EmailConfig     `json:"email_delivery"`
 }
 
 type EmailConfig struct {
-    GmailEmail       string `json:"gmail_email"`
-    KindleEmail      string `json:"kindle_email"`
-    SendToKindle     bool   `json:"send_to_kindle"`
-    EmailSubject     string `json:"email_subject"`
-    TokenFile        string `json:"token_file"`
-    CredentialsFile  string `json:"credentials_file"`
+    Enabled         bool         `json:"enabled"`
+    Email           string       `json:"email"`               // Gmail account email
+    AppPassword     string       `json:"app_password"`       // Gmail app password (not regular password)
+    SMTPServer      string       `json:"smtp_server"`        // smtp.gmail.com
+    SMTPPort        int          `json:"smtp_port"`          // 587
+    Recipients      []KindleConfig  `json:"recipients"`
+    Subject         string          `json:"subject"`
+}
+
+type KindleConfig struct {
+    Name            string `json:"name"`               // Friendly name (e.g., "My Kindle")
+    Email           string `json:"email"`              // Target email (@kindle.com or any email)
+    Type            string `json:"type"`               // "kindle", "email", etc.
+    Default         bool   `json:"default"`            // Default recipient
 }
 
 // Using native os and encoding/json
-func (c *Config) Load() error
-func (c *Config) Save() error
-func (c *Config) LoadFromEnv() error
-func (c *Config) ValidateGmailConfig() error
+func (c *BookConfig) Load() error
+func (c *BookConfig) Save() error
+func (c *BookConfig) LoadFromEnv() error
+func (c *BookConfig) ValidateEmailConfig() error
+func (c *BookConfig) GetDefaultRecipient() *KindleConfig
+func (c *BookConfig) AddRecipient(recipient KindleConfig) error
 ```
 
 #### 1.3 HTTP Client Foundation (Native)
@@ -184,7 +222,7 @@ type Client struct {
 }
 
 // Using native net/http with Bearer token authentication
-func NewClient(config *Config) (*Client, error)
+func NewClient(config *BookConfig) (*Client, error)
 func (c *Client) Do(req *http.Request) (*http.Response, error)
 func (c *Client) DoWithRetry(req *http.Request) (*http.Response, error)
 func (c *Client) addAuthHeaders(req *http.Request)
@@ -198,7 +236,7 @@ func (c *Client) SetAPIToken(token string)
 type AuthService struct {
     client   *Client
     apiToken string
-    config   *Config
+    config   *BookConfig
 }
 
 // Using native net/http with Bearer token authentication
@@ -228,7 +266,7 @@ type App struct {
     state      AppState
     width      int
     height     int
-    config     *Config
+    config     *BookConfig
     authModel  *AuthModel
     searchModel *SearchModel
     downloadModel *DownloadModel
@@ -299,23 +337,25 @@ func (m DownloadModel) Update(msg tea.Msg) (*DownloadModel, tea.Cmd)
 func (m DownloadModel) View() string
 ```
 
-#### 3.4 Gmail Configuration Model
+#### 3.4 Email Configuration Model
 ```go
-type GmailModel struct {
-    inputs       []textinput.Model
+type EmailModel struct {
+    inputs       []textinput.Model  // [gmail_email, app_password, recipient_email, recipient_name]
     focused      int
     testResult   string
     testing      bool
     spinner      spinner.Model
     config       *EmailConfig
-    authMethod   GmailAuthMethod
-    environment  *Environment
+    recipients   []KindleConfig
+    selectedRecipient int
 }
 
-func NewGmailModel(config *EmailConfig) *GmailModel
-func (m GmailModel) Update(msg tea.Msg) (*GmailModel, tea.Cmd)
-func (m GmailModel) View() string
-func (m GmailModel) TestGmailConnection() tea.Cmd
+func NewEmailModel(config *EmailConfig) *EmailModel
+func (m EmailModel) Update(msg tea.Msg) (*EmailModel, tea.Cmd)
+func (m EmailModel) View() string
+func (m EmailModel) TestEmailConnection() tea.Cmd
+func (m EmailModel) AddRecipient() tea.Cmd
+func (m EmailModel) RemoveRecipient(index int) tea.Cmd
 ```
 
 ### Phase 4: Book Discovery and Metadata (Week 3-4)
@@ -441,24 +481,83 @@ const containerXML = `<?xml version="1.0"?>
 </container>`
 ```
 
-### Phase 7: Gmail Integration and TUI Polish (Week 6-7)
+### Phase 7: Email Delivery Integration and TUI Polish (Week 6-7)
 
-#### 7.1 Gmail Service Integration
-- Gmail OAuth2 authentication with environment detection
-- Email composition with EPUB attachments
-- Multiple authentication methods (browser, manual, app password)
-- Kindle delivery after successful download
+#### 7.1 Email Delivery Service Integration
+- Implement SMTP or Gmail API for sending emails to Kindle addresses
+- Email delivery with EPUB attachments to "Send to Kindle" email addresses
+- Track and report email delivery status to the TUI
 
 #### 7.2 Enhanced Download Progress
-- Real-time download progress with Gmail delivery status
-- Email delivery confirmation and error handling
-- Integrated workflow from download to Kindle delivery
+- Real-time download progress with email delivery status
+- Delivery confirmation and error handling via email status
+- Integrated workflow from download to Kindle email delivery
 
 #### 7.3 Final TUI Polish
+- Improved layout, shortcuts, and error displays
+- Refined loading animations and notifications
+- Persistent settings, search state, and delivery logs
 - Consistent styling and theming
 - Keyboard shortcuts and navigation improvements
 - Help screens and user guidance
 - Settings persistence and management
+
+## Updated Implementation Timeline
+
+### **Week 1: Foundation & Core Services**
+- Project setup with Go modules and tooling
+- Configuration management with layered approach (file + env + validation)
+- Service layer architecture with interfaces and dependency injection
+- HTTP client with connection pooling, middleware, and retry logic
+- Error handling with structured error types and user-friendly messages
+- API token authentication service with secure storage
+- Basic TUI shell with Bubble Tea and centralized state management
+
+### **Week 2: Book Services & Enhanced TUI**
+- O'Reilly API integration with context support and rate limiting
+- Book search and metadata extraction with input validation
+- TUI models for search and navigation with loading states
+- Comprehensive error handling with retry logic and user feedback
+- Progress tracking infrastructure with persistence
+- Unit tests for core services with mock interfaces
+
+### **Week 3: Download System & EPUB Generation**
+- Worker pool-based concurrent download system with memory management
+- Chapter and asset downloading with resume capability and progress tracking
+- Streaming EPUB generation to handle large books efficiently
+- Download progress UI with ETA, cancellation, and error recovery
+- State persistence for interrupted downloads with automatic resume
+- Performance optimization: connection pooling and resource management
+
+### **Week 4: Gmail Integration & Polish**
+- Gmail SMTP service with comprehensive validation and error handling
+- Email composition with EPUB attachments and size limits
+- Gmail configuration UI with connection testing and credential validation
+- Security hardening: input sanitization, rate limiting, secure storage
+- Final TUI polish: themes, keyboard shortcuts, help system, accessibility
+- Integration tests for email delivery and end-to-end workflows
+
+### **Week 5: Quality & Release (Optional)**
+- Security audit: vulnerability scanning, penetration testing, OWASP compliance
+- Performance optimization: memory profiling, CPU profiling, load testing  
+- Cross-platform testing and compatibility (macOS, Linux, Windows)
+- Release preparation with GoReleaser and automated CI/CD pipelines
+- Comprehensive documentation: setup guides, troubleshooting, API docs
+- Code quality tools: linting, static analysis, test coverage reporting
+
+**Total Development Time**: 4-5 weeks for production-ready CLI tool with enterprise-grade features.
+
+## Summary of Key Improvements
+
+1. **Better Architecture**: Service layer, dependency injection, interfaces
+2. **Enhanced Security**: Secure storage, input validation, rate limiting
+3. **Improved UX**: Progress tracking with ETA, resume downloads, themes
+4. **Performance**: Connection pooling, worker pools, streaming EPUB generation
+5. **Reliability**: Context cancellation, graceful shutdown, error recovery
+6. **Maintainability**: Structured logging, metrics, comprehensive testing
+7. **Professional Polish**: CI/CD, documentation, cross-platform support
+
+This approach ensures you build a robust, maintainable, and user-friendly tool that can handle real-world usage scenarios effectively.
 
 ## Dependencies
 
@@ -472,9 +571,10 @@ const containerXML = `<?xml version="1.0"?>
 "github.com/charmbracelet/bubbles/progress"
 "github.com/charmbracelet/bubbles/table"
 
-// Gmail API (only external API dependency)
-"golang.org/x/oauth2/google"
-"google.golang.org/api/gmail/v1"
+// Email delivery (Gmail SMTP)
+"net/smtp"
+"crypto/tls"
+```
 
 // Rate limiting (only external networking dependency)
 "golang.org/x/time/rate"
@@ -511,23 +611,6 @@ const containerXML = `<?xml version="1.0"?>
 "os/exec"
 ```
 
-### Removed External Dependencies
-```go
-// Removed in favor of native alternatives:
-// "github.com/PuerkitoBio/goquery" -> net/html
-// "github.com/bmaupin/go-epub" -> archive/zip + encoding/xml
-// "github.com/spf13/cobra" -> manual flag parsing or custom CLI
-// "github.com/spf13/viper" -> encoding/json + os
-// "github.com/schollz/progressbar/v3" -> bubbles/progress
-// "github.com/sirupsen/logrus" -> native log package
-// "github.com/stretchr/testify" -> native testing
-
-// Removed due to API token authentication:
-// "net/http/cookiejar" -> no cookies needed
-// "database/sql" -> no browser cookie extraction needed
-// Cookie management packages -> API tokens don't expire like sessions
-```
-
 ## Configuration
 
 ### Environment Variables
@@ -543,12 +626,11 @@ KOREILLY_USER_AGENT="KOReilly/1.0"
 KOREILLY_MAX_RETRIES="3"
 KOREILLY_REQUEST_DELAY="1s"
 
-# Gmail Configuration
-KOREILLY_GMAIL_EMAIL=""
-KOREILLY_KINDLE_EMAIL=""
-KOREILLY_SEND_TO_KINDLE="false"
-KOREILLY_GMAIL_CREDENTIALS="./credentials.json"
-KOREILLY_GMAIL_TOKEN="./token.json"
+# Email Delivery Configuration (Gmail only)
+KOREILLY_EMAIL_ENABLED="false"
+KOREILLY_EMAIL_ADDRESS=""
+KOREILLY_EMAIL_APP_PASSWORD=""
+KOREILLY_DEFAULT_RECIPIENT="your-username@kindle.com"
 ```
 
 ### Configuration File (koreilly.json)
@@ -570,13 +652,21 @@ KOREILLY_GMAIL_TOKEN="./token.json"
     "max_retries": 3,
     "timeout": "30s"
   },
-  "gmail_config": {
-    "gmail_email": "",
-    "kindle_email": "",
-    "send_to_kindle": false,
-    "email_subject": "{{.Title}} - O'Reilly Book",
-    "token_file": "./token.json",
-    "credentials_file": "./credentials.json"
+  "email_delivery": {
+    "enabled": false,
+    "email": "",
+    "app_password": "",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "recipients": [
+      {
+        "name": "My Kindle",
+        "email": "your-username@kindle.com",
+        "type": "kindle",
+        "default": true
+      }
+    ],
+    "subject": "{{.Title}} - O'Reilly Book"
   },
   "ui": {
     "theme": "default",
@@ -586,6 +676,118 @@ KOREILLY_GMAIL_TOKEN="./token.json"
 }
 ```
 
+## User Setup Guide
+
+### Gmail Integration Setup
+
+To enable automatic book delivery to your Kindle device via email, you'll need to configure Gmail SMTP authentication and set up your Kindle to receive emails from your Gmail account.
+
+#### Step 1: Create a Gmail App Password
+
+1. **Go to your Google Account settings**
+   - Visit [myaccount.google.com](https://myaccount.google.com)
+   - Sign in to your Gmail account
+
+2. **Enable 2-Factor Authentication** (required for app passwords)
+   - Go to "Security" in the left sidebar
+   - Under "Signing in to Google", select "2-Step Verification"
+   - Follow the setup instructions if not already enabled
+
+3. **Generate an App Password**
+   - Still in the "Security" section, select "App passwords"
+   - You may need to sign in again
+   - Select "Mail" from the "Select app" dropdown
+   - Select "Other (Custom name)" from the "Select device" dropdown
+   - Enter "KOReilly CLI" as the custom name
+   - Click "Generate"
+   - **Copy the 16-character password** (it will look like: `abcd efgh ijkl mnop`)
+
+4. **Save the App Password**
+   - Use this app password in your KOReilly configuration
+   - **Never use your regular Gmail password** - only use the generated app password
+   - Store it securely as it won't be shown again
+
+#### Step 2: Configure Your Kindle Email Whitelist
+
+1. **Find your Kindle email address**
+   - On your Kindle: Go to Settings → Device Options → Device Email
+   - It will look like: `your-username@kindle.com`
+
+2. **Add your Gmail to Kindle's approved list**
+   - Visit [Amazon's Manage Your Content and Devices](https://www.amazon.com/mn/dcw/myx.html)
+   - Sign in to your Amazon account
+   - Go to the "Preferences" tab
+   - Find "Personal Document Settings"
+   - Under "Approved Personal Document E-mail List", click "Add a new approved e-mail address"
+   - Enter your Gmail address (the one you'll use with KOReilly)
+   - Click "Add Address"
+
+3. **Configure delivery preferences** (optional)
+   - In the same section, you can set whether documents are delivered via Wi-Fi or also via cellular
+   - You can also set up automatic conversion of documents
+
+#### Step 3: Configure KOReilly
+
+Update your configuration file or environment variables:
+
+**Environment Variables:**
+```bash
+export KOREILLY_EMAIL_ENABLED="true"
+export KOREILLY_EMAIL_ADDRESS="your-email@gmail.com"
+export KOREILLY_EMAIL_APP_PASSWORD="abcd efgh ijkl mnop"  # Use the app password from Step 1
+export KOREILLY_DEFAULT_RECIPIENT="your-username@kindle.com"  # From Step 2
+```
+
+**Configuration File (koreilly.json):**
+```json
+{
+  "email_delivery": {
+    "enabled": true,
+    "email": "your-email@gmail.com",
+    "app_password": "abcd efgh ijkl mnop",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "recipients": [
+      {
+        "name": "My Kindle",
+        "email": "your-username@kindle.com",
+        "type": "kindle",
+        "default": true
+      }
+    ]
+  }
+}
+```
+
+#### Step 4: Test the Setup
+
+1. **Test email delivery in KOReilly:**
+   - Use the TUI's email setup section to test connectivity
+   - Send a test email to verify the configuration works
+
+2. **Check your Kindle:**
+   - Downloaded books should appear in your Kindle library within a few minutes
+   - Books are typically delivered to the "Documents" section
+
+**Common Issues:**
+
+* **"Authentication failed" error:**
+	+ Verify you're using the app password, not your regular Gmail password
+	+ Ensure 2-Factor Authentication is enabled on your Google account
+	+ Double-check the app password was copied correctly (remove any spaces)
+* **Emails not appearing on Kindle:**
+	+ Verify your Gmail address is in the Kindle approved email list
+	+ Check the Kindle email address is correct in your configuration
+	+ Ensure your Kindle is connected to Wi-Fi
+* **"Invalid recipients" error:**
+	+ Verify the Kindle email format: `username@kindle.com`
+	+ Check for typos in the email address
+	+ Ensure the recipient is marked as "kindle" type in configuration
+* **SMTP connection issues:**
+	+ Verify SMTP settings: `smtp.gmail.com:587`
+	+ Check your internet connection
+	+ Some corporate networks may block SMTP ports
+
 ## TUI User Experience
 
 ### Main Interface Flow
@@ -593,13 +795,13 @@ KOREILLY_GMAIL_TOKEN="./token.json"
 ┌─────────────────────────────────────────────────────────────┐
 │                      KOReilly v1.0                         │
 ├─────────────────────────────────────────────────────────────┤
-│  [T]oken [S]earch [D]ownload [G]mail Setup [Q]uit          │
+│  [T]oken [S]earch [D]ownload [K]indle Setup [Q]uit         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Status: ● Connected to O'Reilly Learning                  │
 │  API Token: ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●abcd        │
 │  Output: ./books/                                           │
-│  Gmail: 📧 user@gmail.com → your-username@kindle.com       │
+│  Email Delivery: user@gmail.com → your-username@kindle.com │
 │                                                             │
 │  Recent Downloads:                                          │
 │  ✓ Python Crash Course (9781593279288) 📧 Sent            │
@@ -676,197 +878,347 @@ KOREILLY_GMAIL_TOKEN="./token.json"
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Testing Strategy
+### Kindle Setup Instructions Help Panel
+```
+┌─────────────────────────────────────────────────────────────┐
+│                Kindle Setup Instructions                   │
+├─────────────────────────────────────────────────────────────┤
+│ To send books to your Kindle, you need to:                 │
+│                                                            │
+│ 1. Create an "App Password" for your email account:        │
+│    - For Gmail:                                            │
+│      a. Visit https://myaccount.google.com/security        │
+│      b. Enable 2-Step Verification                        │
+│      c. Under "App passwords", create one for KOReilly     │
+│    - For other providers, check their help docs.           │
+│                                                            │
+│ 2. Add your sending email to your Kindle whitelist:        │
+│    - Go to https://amazon.com/myk                          │
+│    - Settings → "Approved Personal Document E-mail List"   │
+│    - Add your email (e.g., user@gmail.com)                 │
+│                                                            │
+│ 💡 Press [H] in Kindle Setup for these instructions        │
+│                                                            │
+│ [Enter] Back [Q] Quit                                      │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### Unit Tests (Native testing package)
+## Development Best Practices
+
+### 1. Testing Strategy
 ```go
-func TestConfig_Load(t *testing.T)
-func TestClient_DoWithRetry(t *testing.T)
-func TestEPUBBuilder_Create(t *testing.T)
-func TestHTMLProcessor_SanitizeHTML(t *testing.T)
-func TestGmailService_OAuth2(t *testing.T)
-func TestGmailService_SendToKindle(t *testing.T)
-func TestAuthService_ValidateToken(t *testing.T)
+// Table-driven tests for comprehensive coverage
+func TestBookService_Search(t *testing.T) {
+    tests := []struct {
+        name     string
+        query    string
+        expected []models.Book
+        wantErr  bool
+    }{
+        // Test cases here
+    }
+}
+
+// Mock interfaces for isolated unit tests
+type MockBookService struct {
+    SearchFunc func(ctx context.Context, query string) ([]models.Book, error)
+}
+
+// Integration tests with test containers
+func TestDownloadFlow(t *testing.T) {
+    // Set up test environment
+    // Run full download flow
+    // Verify EPUB generation
+    // Test email delivery
+}
 ```
 
-### Integration Tests
+### 2. Code Quality Tools
+```makefile
+# Makefile targets for development
+.PHONY: lint test build release
+
+lint:
+	golangci-lint run ./...
+	govulncheck ./...
+
+test:
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out
+
+build:
+	go build -ldflags "-X main.version=$(VERSION)" ./cmd/koreilly
+
+release:
+	goreleaser release --rm-dist
+```
+
+### 3. CI/CD Pipeline
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      - run: make lint
+      - run: make test
+      - run: make build
+```
+
+### 4. Documentation Strategy
+- **API Documentation**: Use Go doc comments
+- **User Guide**: Markdown with screenshots
+- **Architecture Docs**: Decision records (ADRs)
+- **Troubleshooting**: Common issues and solutions
+## Architectural Best Practices & Recommendations
+
+### **1. Service Layer Architecture**
+Implement a clean service layer pattern to separate business logic from infrastructure concerns:
+
 ```go
-func TestEndToEndDownload(t *testing.T)
-func TestAPITokenAuthenticationFlow(t *testing.T)
-func TestEPUBValidation(t *testing.T)
-func TestGmailDeliveryFlow(t *testing.T)
-func TestKindleEmailDelivery(t *testing.T)
+// internal/services/interfaces.go
+type BookService interface {
+    Search(ctx context.Context, query string, opts SearchOptions) ([]models.Book, error)
+    GetMetadata(ctx context.Context, bookID string) (*models.Book, error)
+    DownloadChapter(ctx context.Context, chapterURL string) (*models.Chapter, error)
+}
+
+type EPUBService interface {
+    Generate(ctx context.Context, book *models.Book, chapters []models.Chapter) (*models.EPUB, error)
+    Save(ctx context.Context, epub *models.EPUB, outputPath string) error
+}
+
+type DeliveryService interface {
+    ValidateConfig(config *EmailConfig) error
+    SendEPUB(ctx context.Context, epub *models.EPUB, recipients []KindleConfig) error
+    TestConnection(ctx context.Context, config *EmailConfig) error
+}
 ```
 
-### TUI Tests
-```go
-func TestAuthModel_Update(t *testing.T)
-func TestDownloadModel_ProgressUpdate(t *testing.T)
-func TestSearchModel_Navigation(t *testing.T)
-func TestGmailModel_Configuration(t *testing.T)
-func TestGmailModel_TestConnection(t *testing.T)
-```
-
-## Security Considerations
-
-1. **API Token Management**
-   - Secure API token storage using native `os` permissions (0600)
-   - Environment variable support for CI/CD environments
-   - No plaintext token storage in logs or error messages
-   - Automatic token masking in UI displays
-   - Token validation against O'Reilly API on startup
-
-2. **Gmail OAuth2 Security**
-   - OAuth2 flow with Google's secure authorization
-   - Token refresh handling using Google's libraries
-   - Secure credential storage with file permissions
-   - No password storage required
-   - TLS encryption for all Gmail API calls
-
-3. **Network Security**
-   - HTTPS-only communication with O'Reilly Learning API
-   - Bearer token authentication in request headers
-   - Rate limiting to prevent API abuse
-   - Proxy support for corporate environments
-   - Certificate validation for all connections
-
-4. **File System Security**
-   - Configuration files with restricted permissions (0600)
-   - EPUB files created with appropriate permissions
-   - No temporary credential files
-   - Secure cleanup of sensitive data on exit
-
-5. **Token Security Best Practices**
-   - No hardcoded API tokens in source code
-   - Token expiration checking and user notification
-   - Secure token generation recommendations for users
-   - Clear token revocation instructions in documentation
-
-## Email Service Features
-
-### Simplified Dependencies
+### **2. Configuration Management Best Practices**
+- **Layered Configuration**: Environment variables override config file values
+- **Validation**: Validate all configuration at startup
+- **Secrets Management**: Never log sensitive data (API tokens, passwords)
+- **Default Values**: Provide sensible defaults for all optional settings
 
 ```go
-// Gmail-specific dependencies (minimal)
-"golang.org/x/oauth2"
-"golang.org/x/oauth2/google"
-"google.golang.org/api/gmail/v1"
-
-// Native Go libraries (no change)
-"net/http"
-"encoding/json"
-"encoding/base64"
-"mime"
-"mime/multipart"
-"io"
-"os"
-"path/filepath"
-// ... other native libraries
+// internal/config/loader.go
+func Load() (*BookConfig, error) {
+    cfg := NewDefaultConfig()
+    
+    // Layer 1: Load from config file
+    if err := cfg.LoadFromFile(); err != nil && !os.IsNotExist(err) {
+        return nil, fmt.Errorf("loading config file: %w", err)
+    }
+    
+    // Layer 2: Override with environment variables
+    if err := cfg.LoadFromEnv(); err != nil {
+        return nil, fmt.Errorf("loading env vars: %w", err)
+    }
+    
+    // Layer 3: Validate final configuration
+    if err := cfg.Validate(); err != nil {
+        return nil, fmt.Errorf("invalid config: %w", err)
+    }
+    
+    return cfg, nil
+}
 ```
 
-### Gmail-Only Benefits
+### **3. Error Handling Strategy**
+- **Structured Errors**: Use custom error types with context
+- **Error Wrapping**: Preserve error chains for debugging
+- **User-Friendly Messages**: Show actionable error messages in TUI
+- **Retry Logic**: Implement exponential backoff for network operations
 
-#### **Simplified User Experience**
-- **One provider to support** = less confusion
-- **No provider selection** = faster setup
-- **Gmail OAuth2** = most secure method
-- **Largest user base** = covers most users
+```go
+// pkg/errors/errors.go
+type ErrType string
 
-#### **Reduced Code Complexity**
-- **No provider detection logic**
-- **No SMTP templates**
-- **No manual configuration**
-- **Single authentication flow**
+const (
+    ErrTypeAuth       ErrType = "authentication"
+    ErrTypeNetwork    ErrType = "network"
+    ErrTypeValidation ErrType = "validation"
+    ErrTypeEmail      ErrType = "email_delivery"
+)
 
-#### **Better User Support**
-- **One set of instructions**
-- **Well-documented Gmail API**
-- **Consistent behavior**
-- **Google's reliable infrastructure**
+type AppError struct {
+    Type    ErrType
+    Code    string
+    Message string
+    Err     error
+    Context map[string]interface{}
+}
 
-### Implementation Timeline (Updated)
+func (e *AppError) Error() string {
+    if e.Err != nil {
+        return fmt.Sprintf("%s: %s: %v", e.Type, e.Message, e.Err)
+    }
+    return fmt.Sprintf("%s: %s", e.Type, e.Message)
+}
 
-#### **Week 1**: Core infrastructure with API token authentication and basic TUI
-- Project setup with minimal dependencies
-- API token authentication system
-- Bearer token HTTP client
-- Basic TUI interface with token input
-
-#### **Week 2**: Book discovery with native HTML parsing, search TUI, and Gmail OAuth2 setup
-- O'Reilly API integration with token auth
-- Book search and metadata retrieval
-- Gmail OAuth2 setup and authentication
-- TUI search interface
-
-#### **Week 3**: Content processing, native EPUB generation, and download progress interface
-- Chapter and asset downloading
-- Native EPUB generation using archive/zip
-- Download progress interface
-- Error handling and retry logic
-
-#### **Week 4**: Gmail integration for Kindle delivery, TUI polish, and testing
-- Gmail API integration for Kindle delivery
-- Email composition with EPUB attachments
-- TUI polish and user experience improvements
-- Testing and documentation
-
-### Quick Setup Guide for Users (Updated)
-
-```markdown
-# KOReilly Setup Guide
-
-## Prerequisites
-- O'Reilly Learning subscription
-- Gmail account (for Kindle delivery)
-
-## Setup Steps
-
-### 1. Get your O'Reilly API token:
-- Go to learning.oreilly.com
-- Sign in and visit Profile → API Keys
-- Create a new API key and copy it
-
-### 2. Run KOReilly:
-```bash
-koreilly
+func NewAuthError(message string, err error) *AppError {
+    return &AppError{
+        Type:    ErrTypeAuth,
+        Message: message,
+        Err:     err,
+    }
+}
 ```
 
-### 3. Enter your API token when prompted
+### **4. TUI State Management**
+- **Centralized State**: Use a single source of truth for application state
+- **Immutable Updates**: Update state through pure functions
+- **Persistence**: Save critical state to prevent data loss
+- **Loading States**: Show progress for all async operations
 
-### 4. (Optional) Set up Gmail for Kindle delivery:
+```go
+// internal/tui/state/manager.go
+type AppState struct {
+    CurrentView    ViewType
+    Auth          *AuthState
+    Search        *SearchState
+    Download      *DownloadState
+    EmailDelivery *EmailState
+    Settings      *SettingsState
+}
 
-**Option A: Full Desktop Environment**
-- Press 'G' for Gmail setup
-- Follow OAuth2 authorization (browser opens automatically)
-- Enter your Kindle email address
+type StateManager struct {
+    state    *AppState
+    mu       sync.RWMutex
+    persist  PersistenceLayer
+}
 
-**Option B: SSH/Remote/Headless Environment**
-- Press 'G' for Gmail setup
-- Choose "Manual OAuth2"
-- Copy the authorization URL
-- Open URL on phone/another device
-- Paste authorization code back in terminal
-
-**Option C: Simple App Password (Fallback)**
-- Press 'G' for Gmail setup
-- Choose "App Password"
-- Generate Gmail app password at myaccount.google.com
-- Enter email and app password
-
-### 5. Start downloading books!
-
-**Setup Times:**
-- API token: ~2 minutes
-- Gmail OAuth2 (desktop): +2 minutes  
-- Gmail OAuth2 (manual): +3 minutes
-- Gmail App Password: +2 minutes
+func (sm *StateManager) UpdateAsync(ctx context.Context, updater func(*AppState) *AppState) {
+    sm.mu.Lock()
+    defer sm.mu.Unlock()
+    
+    newState := updater(sm.state)
+    sm.state = newState
+    
+    // Persist critical state changes
+    go sm.persist.Save(ctx, newState)
+}
 ```
 
-## Timeline Summary
+### **5. Security Recommendations**
+- **Input Validation**: Sanitize all user inputs and API responses
+- **Rate Limiting**: Protect against API abuse
+- **Secure Storage**: Encrypt sensitive data at rest
+- **Network Security**: Use TLS for all communications
 
-- **Week 1**: Core infrastructure with API token authentication and basic TUI
-- **Week 2**: Book discovery with native HTML parsing, search TUI, and Gmail OAuth2 setup
-- **Week 3**: Content processing, native EPUB generation, and download progress interface
-- **Week 4**: Gmail integration for Kindle delivery, TUI polish, and testing
+```go
+// internal/security/validator.go
+func ValidateBookID(bookID string) error {
+    if len(bookID) == 0 {
+        return errors.New("book ID cannot be empty")
+    }
+    
+    // Only allow alphanumeric and specific characters
+    if !regexp.MustCompile(`^[a-zA-Z0-9\-_]+$`).MatchString(bookID) {
+        return errors.New("book ID contains invalid characters")
+    }
+    
+    return nil
+}
 
-Total estimated development time: **4 weeks** for MVP with minimal dependencies, beautiful TUI interface, and Gmail-only Kindle delivery.
+func SanitizeFilename(name string) string {
+    // Remove or replace dangerous characters
+    safe := regexp.MustCompile(`[<>:"/\\|?*]`).ReplaceAllString(name, "_")
+    
+    // Limit length to prevent filesystem issues
+    if len(safe) > 255 {
+        safe = safe[:255]
+    }
+    
+    return safe
+}
+```
+
+### **6. Performance Optimization**
+- **Connection Pooling**: Reuse HTTP connections
+- **Worker Pools**: Limit concurrent operations
+- **Memory Management**: Stream large files instead of loading into memory
+- **Caching**: Cache metadata and frequently accessed data
+
+```go
+// internal/client/pool.go
+type ConnectionPool struct {
+    client *http.Client
+    pool   *sync.Pool
+}
+
+func NewConnectionPool(maxConnections int) *ConnectionPool {
+    transport := &http.Transport{
+        MaxIdleConns:        maxConnections,
+        MaxIdleConnsPerHost: maxConnections / 4,
+        IdleConnTimeout:     90 * time.Second,
+        DisableCompression:  false,
+    }
+    
+    return &ConnectionPool{
+        client: &http.Client{
+            Transport: transport,
+            Timeout:   30 * time.Second,
+        },
+    }
+}
+```
+
+### **7. Testing Strategy**
+- **Unit Tests**: Test individual components in isolation
+- **Integration Tests**: Test component interactions
+- **End-to-End Tests**: Test complete user workflows
+- **Mock Services**: Use interfaces for dependency injection
+
+```go
+// internal/services/book/service_test.go
+func TestBookService_Search(t *testing.T) {
+    tests := []struct {
+        name     string
+        query    string
+        mockResp string
+        want     []models.Book
+        wantErr  bool
+    }{
+        {
+            name:     "successful search",
+            query:    "golang",
+            mockResp: `{"results": [{"id": "123", "title": "Go Programming"}]}`,
+            want:     []models.Book{{ID: "123", Title: "Go Programming"}},
+            wantErr:  false,
+        },
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            client := &MockHTTPClient{
+                DoFunc: func(req *http.Request) (*http.Response, error) {
+                    return &http.Response{
+                        StatusCode: 200,
+                        Body:       io.NopCloser(strings.NewReader(tt.mockResp)),
+                    }, nil
+                },
+            }
+            
+            service := NewBookService(client)
+            got, err := service.Search(context.Background(), tt.query, SearchOptions{})
+            
+            if (err != nil) != tt.wantErr {
+                t.Errorf("Search() error = %v, wantErr %v", err, tt.wantErr)
+                return
+            }
+            
+            if !reflect.DeepEqual(got, tt.want) {
+                t.Errorf("Search() = %v, want %v", got, tt.want)
+            }
+        })
+    }
+}
+```
