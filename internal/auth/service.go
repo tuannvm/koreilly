@@ -26,11 +26,16 @@ type Token struct {
 }
 
 // NewService creates a new authentication service
-func NewService(cfg *config.Config) *Service {
+func NewService(cfg *config.Config) (*Service, error) {
+	oreillySvc, err := oreilly.NewService()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create O'Reilly service: %w", err)
+	}
+
 	return &Service{
 		config:  cfg,
-		oreilly: oreilly.NewService(),
-	}
+		oreilly: oreillySvc,
+	}, nil
 }
 
 // Authenticate authenticates with O'Reilly API using username and password

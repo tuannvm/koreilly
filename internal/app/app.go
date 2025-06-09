@@ -39,7 +39,10 @@ func Run() error {
 	setupLogger(cfg)
 
 	// Initialize authentication service
-	authSvc := auth.NewService(cfg)
+	authSvc, err := auth.NewService(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize auth service: %w", err)
+	}
 
 	// Initialize TUI
 	ui, err := tui.NewApp(cfg, authSvc)
