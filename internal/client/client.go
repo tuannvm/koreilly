@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"time"
 
 	"golang.org/x/net/publicsuffix"
@@ -99,14 +101,27 @@ func DefaultRetryPolicy() *RetryPolicy {
 func New(baseURL string, opts ...Option) *Client {
 	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false,
+		},
+		DisableCompression: false,
+		ForceAttemptHTTP2:  true,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+	}
+
 	httpClient := &http.Client{
-		Jar: jar,
+		Jar:       jar,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Preserve headers during redirects
-			req.Header = via[0].Header.Clone()
+			if len(via) > 0 {
+				req.Header = via[0].Header.Clone()
+			}
 			return nil
 		},
-		Timeout: 30 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 
 	return NewWithHTTPClient(baseURL, httpClient, opts...)
@@ -182,46 +197,75 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("rate limiter error: %w", err)
 	}
 
-	// Send the request with retries
-	var resp *http.Response
+	// Create a function to get a fresh body reader for retries
+	var bodyBytes []byte
 	var err error
 
+	if req.Body != nil {
+		// Read the body once and store it for retries
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+		// Close the original body
+		req.Body.Close()
+
+		// Create a new body reader that can be reset
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		// Set GetBody function to allow the body to be read multiple times
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+		}
+
+		// Set ContentLength if not already set
+		if req.ContentLength == 0 && len(bodyBytes) > 0 {
+			req.ContentLength = int64(len(bodyBytes))
+		}
+	}
+
+	// Send the request with retries
+	var resp *http.Response
+
 	for attempt := 0; attempt <= c.retryPolicy.MaxRetries; attempt++ {
-		// Create a new request for each attempt to ensure a fresh body
-		var reqBody []byte
-		if req.Body != nil {
-			reqBody, _ = io.ReadAll(req.Body)
-			req.Body.Close()
-			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		// Reset the request body for retries
+		if req.GetBody != nil {
+			var reqErr error
+			if req.Body, reqErr = req.GetBody(); reqErr != nil {
+				return nil, fmt.Errorf("failed to reset request body: %w", reqErr)
+			}
 		}
 
 		resp, err = c.client.Do(req)
 
 		// If no error and status code is not in retryable status codes, return the response
 		if err == nil && !c.retryPolicy.ShouldRetry(resp.StatusCode) {
-			break
+			return resp, nil
 		}
 
-		// If we've reached max retries, break
-		if attempt == c.retryPolicy.MaxRetries {
-			break
-		}
+		// If we get here, we need to retry
+		if attempt < c.retryPolicy.MaxRetries {
+			// Calculate backoff duration
+			backoff := c.retryPolicy.CalculateBackoff(attempt)
+			if c.logger != nil {
+				status := 0
+				if resp != nil {
+					status = resp.StatusCode
+				}
+				c.logger.Printf("Request failed (attempt %d/%d), retrying in %v: %v (status: %d)\n",
+					attempt+1, c.retryPolicy.MaxRetries, backoff, err, status)
+			}
 
-		// Calculate backoff
-		backoff := c.retryPolicy.CalculateBackoff(attempt)
-		// Log the retry
-		if c.logger != nil {
-			c.logger.Printf("Retry %d/%d after %v: %v", attempt+1, c.retryPolicy.MaxRetries, backoff, err)
-		}
-
-		// Wait before retrying
-		time.Sleep(backoff)
-		// Reset the request body for the next attempt
-		if reqBody != nil {
-			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+			// Wait for the backoff duration or context cancellation
+			select {
+			case <-time.After(backoff):
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
 		}
 	}
 
+	// If we've exhausted all retries, return the last error
 	if err != nil {
 		return nil, fmt.Errorf("request failed after %d attempts: %w", c.retryPolicy.MaxRetries+1, err)
 	}
@@ -254,11 +298,29 @@ func (c *Client) Post(ctx context.Context, path, contentType string, body io.Rea
 
 // PostWithHeaders sends a POST request with custom headers and retry logic
 func (c *Client) PostWithHeaders(ctx context.Context, path string, headers map[string]string, body io.Reader) (*http.Response, error) {
+	// Read the entire body into memory so we can reuse it for retries
+	var bodyBytes []byte
+	var err error
+	
+	if body != nil {
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("reading request body: %w", err)
+		}
+	}
+
 	url := c.baseURL + path
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	// Create a new request with context
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	// Set the body
+	if len(bodyBytes) > 0 {
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.ContentLength = int64(len(bodyBytes))
 	}
 
 	// Set default headers
@@ -271,7 +333,33 @@ func (c *Client) PostWithHeaders(ctx context.Context, path string, headers map[s
 		req.Header.Set(k, v)
 	}
 
-	return c.doWithRetry(req)
+	// Ensure we have a content type if there's a body
+	if len(bodyBytes) > 0 && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+
+	// Add connection headers if not present
+	if req.Header.Get("Connection") == "" {
+		req.Header.Set("Connection", "keep-alive")
+	}
+
+	// Add accept header if not present
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
+
+	// Add user agent if not present
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+
+	// Make the request
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	return resp, nil
 }
 
 // doWithRetry sends an HTTP request with retry logic
@@ -307,8 +395,22 @@ func isRetryableError(err error) bool {
 		return false
 	}
 
+	// Add logic to determine if the error is retryable
+	// For example, network timeouts, temporary network errors, etc.
 	// Add more conditions as needed
 	return true
 }
 
+// GetCookies returns the cookies for the given URL from the client's cookie jar
+func (c *Client) GetCookies(urlStr string) []*http.Cookie {
+	if c.client.Jar == nil {
+		return nil
+	}
 
+	url, err := url.Parse(urlStr)
+	if err != nil {
+		return nil
+	}
+
+	return c.client.Jar.Cookies(url)
+}

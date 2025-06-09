@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -29,6 +31,8 @@ type App struct {
 	// States
 	err         error
 	activeInput string // 'username' or 'password'
+	isLoading   bool
+	message     string
 }
 
 // NewApp creates a new TUI application
@@ -99,20 +103,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.current == "auth" {
 				if a.activeInput == "username" {
 					a.activeInput = "password"
-					a.passwordInput.Focus()
 					return a, nil
 				}
 				return a.handleAuth()
 			}
 		case key.Matches(msg, keys.Tab):
-			if a.current == "auth" && a.activeInput == "username" {
-				a.activeInput = "password"
-				a.passwordInput.Focus()
-			} else if a.current == "auth" {
-				a.activeInput = "username"
-				a.usernameInput.Focus()
+			if a.current == "auth" {
+				if a.activeInput == "username" {
+					a.activeInput = "password"
+				} else {
+					a.activeInput = "username"
+				}
+				return a, nil
 			}
-			return a, nil
 		}
 
 	// Handle authentication response
@@ -169,80 +172,148 @@ func (a *App) View() string {
 
 // authView renders the authentication view
 func (a *App) authView() string {
-	var inputView string
-	var helpText string
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("205")).
+		MarginBottom(1)
+
+	header := headerStyle.Render("Welcome to Goreilly!")
+	subHeader := lipgloss.NewStyle().MarginBottom(2).Render("Please enter your O'Reilly credentials to continue.")
+
+	// Create a styled box for the login form
+	formStyle := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(1, 2).
+		Margin(1, 0)
+
+	// Style for input labels
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).MarginRight(2)
+
+	// Only show cursor in the active input field
+	usernameInput := a.usernameInput
+	passwordInput := a.passwordInput
 
 	if a.activeInput == "username" {
-		helpText = "↑/↓: Navigate • Enter: Next • q: Quit"
-		inputView = fmt.Sprintf(
-			"%s\n\n%s",
-			a.usernameInput.View() + " (email)",
-			a.passwordInput.View() + " (password)",
-		)
+		usernameInput.Focus()
+		passwordInput.Blur()
 	} else {
-		helpText = "↑/↓: Navigate • Enter: Login • Tab: Back • q: Quit"
-		inputView = fmt.Sprintf(
-			"%s\n\n%s",
-			a.usernameInput.View() + " (email)",
-			a.passwordInput.View() + " (password)",
-		)
+		usernameInput.Blur()
+		passwordInput.Focus()
 	}
 
-	// Add error message if present
+	// Render the username and password inputs
+	inputs := []string{
+		fmt.Sprintf("%s\n%s", 
+			labelStyle.Render("Email"),
+			usernameInput.View(),
+		),
+		"",
+		fmt.Sprintf("%s\n%s",
+			labelStyle.Render("Password"),
+			passwordInput.View(),
+		),
+	}
+
+	// Add loading spinner if authenticating
+	if a.isLoading {
+		inputs = append(inputs, "", fmt.Sprintf("  %s Authenticating...", a.spinner.View()))
+	}
+
+	// Add status message if any
+	if a.message != "" {
+		msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).MarginTop(1)
+		inputs = append(inputs, "", msgStyle.Render(a.message))
+	}
+
+	// Add help text
+	helpText := lipgloss.NewStyle().Faint(true).Render("↑/↓: Navigate • Enter: Login • Tab: Switch Field • q: Quit")
+	inputs = append(inputs, "", helpText)
+
+	// Combine everything
+	form := formStyle.Render(strings.Join(inputs, "\n"))
+
+	// Show error if any
 	if a.err != nil {
-		helpText = fmt.Sprintf("Error: %s\n\n%s", a.err.Error(), helpText)
+		errMsg := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Render(fmt.Sprintf("Error: %v", a.err))
+		form = fmt.Sprintf("%s\n\n%s", form, errMsg)
 	}
 
-	return fmt.Sprintf(
-		"Welcome to Goreilly!\n\n" +
-		"Please enter your O'Reilly credentials to continue.\n\n" +
-		"%s\n\n%s\n",
-		inputView,
-		helpText,
-	)
+	return fmt.Sprintf("%s\n%s\n\n%s", header, subHeader, form)
 }
 
 // handleAuth handles the authentication flow
 func (a *App) handleAuth() (tea.Model, tea.Cmd) {
-	username := a.usernameInput.Value()
-	password := a.passwordInput.Value()
+	// Get credentials from inputs
+	username := strings.TrimSpace(a.usernameInput.Value())
+	password := strings.TrimSpace(a.passwordInput.Value())
 
 	// Validate inputs
 	if username == "" {
-		a.err = fmt.Errorf("email is required")
-		a.activeInput = "username"
+		a.setError("Email is required")
 		a.usernameInput.Focus()
 		return a, nil
 	}
-
 	if password == "" {
-		a.err = fmt.Errorf("password is required")
-		a.activeInput = "password"
+		a.setError("Password is required")
 		a.passwordInput.Focus()
 		return a, nil
 	}
 
-	// Clear any previous errors
-	a.err = nil
-
-	// Show loading spinner
-	a.current = "loading"
+	// Clear any previous errors and messages
+	a.clearError()
+	a.message = ""
+	a.isLoading = true
 
 	// Start authentication in a goroutine
 	return a, tea.Batch(
 		a.spinner.Tick,
 		func() tea.Msg {
-			token, err := a.authSvc.Authenticate(context.Background(), username, password)
+			// This will block, so we run it in a goroutine
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Show a message that we're attempting to log in
+			a.message = "Attempting to log in..."
+
+			// Call the auth service
+			token, err := a.authSvc.Authenticate(ctx, username, password)
 			if err != nil {
-				// Clear password on error for security
-				a.passwordInput.Reset()
-				a.activeInput = "password"
-				a.passwordInput.Focus()
-				return authError{fmt.Errorf("authentication failed: %v", err)}
+				// Check for common error types and provide user-friendly messages
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "invalid email or password") {
+					errMsg = "Invalid email or password. Please try again."
+				} else if strings.Contains(errMsg, "too many failed attempts") {
+					errMsg = "Too many failed login attempts. Please try again later."
+				} else if strings.Contains(errMsg, "account is inactive") {
+					errMsg = "This account is inactive. Please contact support."
+				}
+				return authError{fmt.Errorf("%s", errMsg)}
 			}
-			return token
+
+			// Show success message
+			a.message = fmt.Sprintf("Login successful! Welcome, %s", username)
+			
+			// Here you would typically transition to the main app view
+			// For now, we'll just show a success message
+			time.Sleep(2 * time.Second) // Show success message briefly
+			
+			return token // Return the token on success
 		},
 	)
+}
+
+// Helper function to set an error message
+func (a *App) setError(msg string) {
+	a.err = fmt.Errorf(msg)
+	a.isLoading = false
+}
+
+// Helper function to clear any error
+func (a *App) clearError() {
+	a.err = nil
 }
 
 // keys defines the key bindings for the application

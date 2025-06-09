@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -103,16 +104,16 @@ func NewService() (*Service, error) {
 	}, nil
 }
 
-// getCSRFToken retrieves the CSRF token from the login page
+// getCSRFToken retrieves the CSRF token from the main page
 func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
-	// Set headers for the login page request
 	headers := map[string]string{
 		"Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
 		"User-Agent": userAgent,
 	}
 
-	// Use the client's Get method with headers
-	resp, err := s.client.Get(ctx, s.baseURL+loginPage, headers)
+	// Try to get the CSRF token from the login page first
+	loginPageURL := "https://www.oreilly.com/member/auth/login/"
+	resp, err := s.client.Get(ctx, loginPageURL, headers)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch login page: %w", err)
 	}
@@ -128,12 +129,31 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("received empty response body from login page")
 	}
 
-	// Debug: Save the response to a file for inspection
-	// os.WriteFile("login_page.html", body, 0644)
-
-
 	// Look for CSRF token in the HTML
 	csrfToken, err := extractCSRFToken(string(body))
+	if err == nil && csrfToken != "" {
+		return csrfToken, nil
+	}
+
+	// If we didn't find the CSRF token in the login page, try the main page
+	resp, err = s.client.Get(ctx, "https://www.oreilly.com", headers)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch homepage: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response body
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read homepage: %w", err)
+	}
+
+	if len(body) == 0 {
+		return "", fmt.Errorf("received empty response body from homepage")
+	}
+
+	// Look for CSRF token in the HTML
+	csrfToken, err = extractCSRFToken(string(body))
 	if err != nil {
 		// Try to get more debug info
 		dbgInfo := string(body)
@@ -151,7 +171,7 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	return csrfToken, nil
 }
 
-// extractCSRFToken extracts the CSRF token from the login page HTML
+// extractCSRFToken extracts the CSRF token from the HTML
 func extractCSRFToken(body string) (string, error) {
 	// Try different patterns to find the CSRF token
 	patterns := []*regexp.Regexp{
@@ -159,12 +179,14 @@ func extractCSRFToken(body string) (string, error) {
 		regexp.MustCompile(`<input[^>]+name=["']csrfmiddlewaretoken["'][^>]+value=["']([^"']+)`),
 		// Look for: <input name="csrfmiddlewaretoken" value="TOKEN" type="hidden">
 		regexp.MustCompile(`<input[^>]+value=["']([^"']+)["'][^>]+name=["']csrfmiddlewaretoken["']`),
-		// Look for: <input type='hidden' name='csrfmiddlewaretoken' value='TOKEN'/>
-		regexp.MustCompile(`<input[^>]+name=['"]csrfmiddlewaretoken['"][^>]+value=['"]([^'"]+)`),
-		// Look for CSRF token in meta tag
-		regexp.MustCompile(`<meta[^>]+name=["']csrf-token['"][^>]+content=["']([^"']+)`),
-		// Look for CSRF token in cookies (if we're handling cookies)
-		regexp.MustCompile(`(?i)csrftoken=([^;]+)`),
+		// Look for: <meta name="csrf-token" content="TOKEN">
+		regexp.MustCompile(`<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)`),
+		// Look for: window.csrfToken = "TOKEN"
+		regexp.MustCompile(`window\.csrfToken\s*=\s*["']([^"']+)`),
+		// Look for: "csrfToken":"TOKEN"
+		regexp.MustCompile(`"csrfToken"\s*:\s*"([^"]+)"`),
+		// Look for: <meta name="csrfmiddlewaretoken" content="TOKEN">
+		regexp.MustCompile(`<meta[^>]+name=["']csrfmiddlewaretoken["'][^>]+content=["']([^"']+)`),
 	}
 
 	// First try to find in the HTML body
@@ -211,42 +233,43 @@ func extractCSRFToken(body string) (string, error) {
 		debugLen, body[:debugLen])
 }
 
-// Login authenticates with O'Reilly and returns a token
+// Login authenticates with O'Reilly using email and password
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResponse, error) {
-	// First, make a GET request to get the login page and set cookies
-	loginPageURL := "https://www.oreilly.com/member/auth/login/"
-	
-	initialHeaders := map[string]string{
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.5",
-		"Connection":      "keep-alive",
-		"User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0",
-	}
-
-	// Get the login page to set initial cookies
-	_, err := s.client.Get(ctx, loginPageURL, initialHeaders)
+	// First, get the CSRF token (this will also set the necessary cookies)
+	csrfToken, err := s.getCSRFToken(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load login page: %w", err)
+		return nil, fmt.Errorf("failed to get CSRF token: %w", err)
 	}
 
-	// Now make the login request
+	// Prepare the login form data
+	formData := url.Values{
+		"csrfmiddlewaretoken": {csrfToken},
+		"email":               {email},
+		"password":            {password},
+		"next":                {"/"},
+		"remember_me":         {"true"},
+	}
+
+	// Make the login request
 	loginURL := "https://www.oreilly.com/member/auth/login/"
-
-	// Prepare form data
-	formData := url.Values{}
-	formData.Set("email", email)
-	formData.Set("password", password)
-	formData.Set("next", "/")
-
-	// Set up the request headers
 	headers := map[string]string{
-		"Content-Type":  "application/x-www-form-urlencoded",
-		"Accept":        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"Origin":        "https://www.oreilly.com",
-		"Referer":       loginPageURL,
-		"User-Agent":    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0",
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Accept":       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+		"Origin":       "https://www.oreilly.com",
+		"Referer":      "https://www.oreilly.com/member/auth/login/",
+		"Accept-Language": "en-US,en;q=0.9",
+		"DNT":           "1",
+		"Connection":    "keep-alive",
+		"Upgrade-Insecure-Requests": "1",
+		"Sec-Fetch-Dest": "document",
+		"Sec-Fetch-Mode": "navigate",
+		"Sec-Fetch-Site": "same-origin",
+		"Sec-Fetch-User": "?1",
 		"Cache-Control": "no-cache",
 	}
+
+	// Log the request for debugging
+	log.Printf("Sending login request to %s", loginURL)
 
 	// Make the login request
 	resp, err := s.client.PostWithHeaders(
@@ -260,86 +283,113 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResp
 	}
 	defer resp.Body.Close()
 
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read login response: %w", err)
+	// Read the response body for debugging
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*4))
+	bodyStr := string(body)
+	log.Printf("Login response status: %d, headers: %v", resp.StatusCode, resp.Header)
+
+	// Check for common error cases in the response body
+	if strings.Contains(bodyStr, "The email or password you entered is incorrect") {
+		return nil, fmt.Errorf("invalid email or password")
+	}
+	if strings.Contains(bodyStr, "This account is inactive") {
+		return nil, fmt.Errorf("account is inactive")
+	}
+	if strings.Contains(bodyStr, "Too many failed login attempts") {
+		return nil, fmt.Errorf("too many failed login attempts - please try again later")
 	}
 
-	// Check for successful login (302 redirect on success)
+	// Check if login was successful (should be a redirect to the home page or profile)
 	if resp.StatusCode != http.StatusFound {
-		// Try to extract error message from response
-		errMsg := ""
-		if len(body) > 200 {
-			errMsg = string(body[:200]) + "..."
-		} else {
-			errMsg = string(body)
+		// Try to extract error message from the response
+		errMsg := "login failed"
+		if errorMatch := regexp.MustCompile(`<div[^>]*class=["'][^"']*error[^"']*["'][^>]*>([^<]+)</div>`).FindStringSubmatch(bodyStr); len(errorMatch) > 1 {
+			errMsg = strings.TrimSpace(errorMatch[1])
 		}
-		return nil, fmt.Errorf("login failed with status %d: %s", resp.StatusCode, errMsg)
+		return nil, fmt.Errorf("%s (status %d)", errMsg, resp.StatusCode)
 	}
 
-	// Check if we were redirected to the home page (successful login)
+	// Get the location header to check for successful login
 	location, err := resp.Location()
-	if err == nil && location.Path == "/" {
-		// Get the JWT token from cookies
-		cookies := resp.Cookies()
-		var jwtToken string
-		for _, cookie := range cookies {
-			if cookie.Name == "jwt_token" || cookie.Name == "auth_token" {
-				jwtToken = cookie.Value
-				break
-			}
+	if err != nil {
+		// If we can't get the location, it might still be a successful login
+		log.Printf("Warning: Failed to get redirect location: %v", err)
+	} else {
+		log.Printf("Redirected to: %s", location.String())
+		// Check if we were redirected back to the login page (failed login)
+		if strings.Contains(location.Path, "/auth/login/") {
+			return nil, fmt.Errorf("login failed - invalid credentials")
 		}
-
-		if jwtToken == "" {
-			return nil, fmt.Errorf("JWT token not found in cookies")
-		}
-
-		// Save the JWT token for future requests
-		s.jwtToken = jwtToken
-
-		// Verify the login by accessing the profile page
-		if err := s.verifyLogin(ctx); err != nil {
-			return nil, fmt.Errorf("login verification failed: %w", err)
-		}
-
-		// Return the token
-		return &LoginResponse{
-			AccessToken: jwtToken,
-			TokenType:   "Bearer",
-			ExpiresIn:   3600, // Default expiration time
-		}, nil
 	}
 
-	return nil, fmt.Errorf("login failed: unexpected redirect to %s", location)
+	// Extract the JWT token from cookies
+	var jwtToken string
+	for _, cookie := range s.client.GetCookies("https://www.oreilly.com") {
+		log.Printf("Cookie: %s=%s", cookie.Name, cookie.Value)
+		if cookie.Name == "orm-jwt" {
+			jwtToken = cookie.Value
+			break
+		}
+	}
+
+	if jwtToken == "" {
+		return nil, fmt.Errorf("no JWT token found in cookies after login")
+	}
+
+	// Verify login by accessing profile page
+	profileURL := "https://www.oreilly.com/member/profile/"
+	profileResp, err := s.client.Get(ctx, profileURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify login: %w", err)
+	}
+	defer profileResp.Body.Close()
+
+	if profileResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to verify login, status: %d", profileResp.StatusCode)
+	}
+
+	log.Printf("Successfully logged in as %s", email)
+	return &LoginResponse{
+		AccessToken: jwtToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   3600, // Default expiration time
+	}, nil
 }
 
 // verifyLogin verifies that the login was successful by accessing the profile page
 func (s *Service) verifyLogin(ctx context.Context) error {
-	// Switch to the Safari base URL for profile access
-	oldBaseURL := s.baseURL
-	s.baseURL = safariBaseURL
-	defer func() { s.baseURL = oldBaseURL }()
+	// Try to access the profile page
+	profileURL := "https://www.oreilly.com/member/profile/"
+	headers := map[string]string{
+		"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+	}
 
-	resp, err := s.client.Get(ctx, s.baseURL+profileURL, nil)
+	resp, err := s.client.Get(ctx, profileURL, headers)
 	if err != nil {
-		return fmt.Errorf("failed to access profile page: %w", err)
+		return fmt.Errorf("failed to verify login: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to verify login, status: %d", resp.StatusCode)
-	}
-
-	// Check if the account is expired
+	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read profile response: %w", err)
+		return fmt.Errorf("failed to read profile page: %w", err)
 	}
 
-	if strings.Contains(string(body), `"user_type":"Expired"`) {
+	// Convert body to string for easier inspection
+	bodyStr := string(body)
+
+	// Check for common error cases
+	switch {
+	case strings.Contains(bodyStr, `"user_type":"Expired"`):
 		return fmt.Errorf("account subscription has expired")
+	case strings.Contains(bodyStr, "signin"):
+		return fmt.Errorf("login failed: you are not signed in")
+	case resp.StatusCode >= 400:
+		return fmt.Errorf("login verification failed with status %d", resp.StatusCode)
 	}
 
+	// If we got here, the login was successful
 	return nil
 }
