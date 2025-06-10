@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -170,6 +172,25 @@ func (a *App) View() string {
 	return s
 }
 
+// sanitizeError removes HTML and other unwanted characters from error messages
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	// Remove HTML tags
+	re := regexp.MustCompile(`<[^>]*>`)
+	clean := re.ReplaceAllString(err.Error(), "")
+	// Replace multiple spaces/newlines with a single space
+	re = regexp.MustCompile(`\s+`)
+	clean = re.ReplaceAllString(clean, " ")
+	// Trim spaces
+	clean = strings.TrimSpace(clean)
+	if clean == "" {
+		return "An unknown error occurred"
+	}
+	return clean
+}
+
 // authView renders the authentication view
 func (a *App) authView() string {
 	headerStyle := lipgloss.NewStyle().
@@ -179,6 +200,11 @@ func (a *App) authView() string {
 
 	header := headerStyle.Render("Welcome to Goreilly!")
 	subHeader := lipgloss.NewStyle().MarginBottom(2).Render("Please enter your O'Reilly credentials to continue.")
+
+	// Sanitize error message if it exists
+	if a.err != nil {
+		a.err = errors.New(sanitizeError(a.err))
+	}
 
 	// Create a styled box for the login form
 	formStyle := lipgloss.NewStyle().
@@ -290,7 +316,7 @@ func (a *App) handleAuth() (tea.Model, tea.Cmd) {
 				} else if strings.Contains(errMsg, "account is inactive") {
 					errMsg = "This account is inactive. Please contact support."
 				}
-				return authError{fmt.Errorf("%s", errMsg)}
+				return authError{errors.New(errMsg)}
 			}
 
 			// Show success message

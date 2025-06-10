@@ -235,11 +235,15 @@ func extractCSRFToken(body string) (string, error) {
 
 // Login authenticates with O'Reilly using email and password
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResponse, error) {
+	log.Println("Starting login process...")
+	
 	// First, get the CSRF token (this will also set the necessary cookies)
+	log.Println("Getting CSRF token...")
 	csrfToken, err := s.getCSRFToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get CSRF token: %w", err)
 	}
+	log.Printf("Got CSRF token: %s...", csrfToken[:10])
 
 	// Prepare the login form data
 	formData := url.Values{
@@ -270,6 +274,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResp
 
 	// Log the request for debugging
 	log.Printf("Sending login request to %s", loginURL)
+	log.Printf("Request headers: %+v", headers)
+	log.Printf("Form data: %+v", formData)
 
 	// Make the login request
 	resp, err := s.client.PostWithHeaders(
@@ -286,27 +292,53 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResp
 	// Read the response body for debugging
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*4))
 	bodyStr := string(body)
-	log.Printf("Login response status: %d, headers: %v", resp.StatusCode, resp.Header)
+	log.Printf("Login response status: %d", resp.StatusCode)
+	log.Printf("Response headers: %+v", resp.Header)
+	log.Printf("Response body (first 500 chars): %s", bodyStr[:min(500, len(bodyStr))])
 
 	// Check for common error cases in the response body
-	if strings.Contains(bodyStr, "The email or password you entered is incorrect") {
+	switch {
+	case strings.Contains(bodyStr, "The email or password you entered is incorrect"):
 		return nil, fmt.Errorf("invalid email or password")
-	}
-	if strings.Contains(bodyStr, "This account is inactive") {
+	case strings.Contains(bodyStr, "This account is inactive"):
 		return nil, fmt.Errorf("account is inactive")
-	}
-	if strings.Contains(bodyStr, "Too many failed login attempts") {
+	case strings.Contains(bodyStr, "Too many failed login attempts"):
 		return nil, fmt.Errorf("too many failed login attempts - please try again later")
+	case strings.Contains(bodyStr, "CSRF verification failed"):
+		return nil, fmt.Errorf("session expired - please try again")
+	case strings.Contains(bodyStr, "<title>Sign In</title>"):
+		return nil, fmt.Errorf("login failed - please check your credentials")
+	case strings.Contains(bodyStr, "<form"):
+		// If we got a form back, it likely means the login failed but the server didn't provide a specific error
+		return nil, fmt.Errorf("login failed - please check your credentials")
 	}
 
 	// Check if login was successful (should be a redirect to the home page or profile)
+	log.Printf("Checking if login was successful...")
 	if resp.StatusCode != http.StatusFound {
+		log.Printf("Unexpected status code: %d (expected %d)", resp.StatusCode, http.StatusFound)
 		// Try to extract error message from the response
-		errMsg := "login failed"
-		if errorMatch := regexp.MustCompile(`<div[^>]*class=["'][^"']*error[^"']*["'][^>]*>([^<]+)</div>`).FindStringSubmatch(bodyStr); len(errorMatch) > 1 {
-			errMsg = strings.TrimSpace(errorMatch[1])
+		errMsg := "login failed - please check your credentials"
+		
+		// Try to find error message in common locations
+		errorPatterns := []*regexp.Regexp{
+			regexp.MustCompile(`<div[^>]*class=["'][^"']*error[^"']*["'][^>]*>([^<]+)</div>`),
+			regexp.MustCompile(`<p[^>]*class=["'][^"']*error[^"']*["'][^>]*>([^<]+)</p>`),
+			regexp.MustCompile(`<div[^>]*role=["']alert["'][^>]*>([^<]+)</div>`),
+			regexp.MustCompile(`<p[^>]*role=["']alert["'][^>]*>([^<]+)</p>`),
 		}
-		return nil, fmt.Errorf("%s (status %d)", errMsg, resp.StatusCode)
+
+		for _, pattern := range errorPatterns {
+			if match := pattern.FindStringSubmatch(bodyStr); len(match) > 1 {
+				if msg := strings.TrimSpace(match[1]); msg != "" {
+					errMsg = msg
+					log.Printf("Found error message in response: %s", errMsg)
+					break
+				}
+			}
+		}
+
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	// Get the location header to check for successful login
@@ -392,4 +424,12 @@ func (s *Service) verifyLogin(ctx context.Context) error {
 
 	// If we got here, the login was successful
 	return nil
+}
+
+// min returns the smaller of x or y
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
 }
