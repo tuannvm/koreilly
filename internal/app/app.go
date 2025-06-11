@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/tuannvm/goreilly/internal/auth"
 	"github.com/tuannvm/goreilly/internal/config"
@@ -61,13 +62,30 @@ func Run() error {
 }
 
 func setupLogger(cfg *config.Config) {
-	// Configure standard logger
+	// Create logs directory if it doesn't exist
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		log.Printf("Failed to create logs directory: %v", err)
+	}
+
+	// Create log file with timestamp
+	logFile := fmt.Sprintf("logs/goreilly_%s.log", time.Now().Format("20060102_150405"))
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Printf("Failed to open log file: %v", err)
+	} else {
+		// Log to both file and stderr
+		multiWriter := io.MultiWriter(os.Stderr, file)
+		log.SetOutput(multiWriter)
+	}
+
+	// Configure logger
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("goreilly: ")
 
-	// In debug mode, we'll log more verbosely
+	// In non-debug mode, we'll still log to file but not to stderr
 	if !cfg.Debug {
-		// In non-debug mode, discard debug logs
-		log.SetOutput(io.Discard)
+		log.SetOutput(file)
 	}
+
+	log.Printf("Logging initialized. Debug mode: %v", cfg.Debug)
 }

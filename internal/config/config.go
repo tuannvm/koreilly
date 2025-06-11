@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -25,12 +26,14 @@ type Config struct {
 
 // Load loads the configuration from file and environment variables
 func Load() (*Config, error) {
+	log.Printf("Loading configuration...")
 	c := &Config{}
 
 	// Set default values
 	c.Debug = false
 	c.LogLevel = "info"
 	c.OutputDir = "books"
+	log.Printf("Default values - Debug: %v, LogLevel: %s, OutputDir: %s", c.Debug, c.LogLevel, c.OutputDir)
 
 	// Bind environment variables with GOREILLY_ prefix
 	viper.SetEnvPrefix("GOREILLY")
@@ -48,19 +51,31 @@ func Load() (*Config, error) {
 	}
 
 	configPath := filepath.Join(configDir, "goreilly", "config.yaml")
+	log.Printf("Looking for config file at: %s", configPath)
+	
 	viper.SetConfigFile(configPath)
 
 	if err := viper.ReadInConfig(); err != nil {
-		if !os.IsNotExist(err) {
+		if os.IsNotExist(err) {
+			log.Printf("Config file not found at %s, using defaults", configPath)
+		} else {
+			log.Printf("Error reading config file: %v", err)
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
+	} else {
+		log.Printf("Successfully read config from %s", configPath)
 	}
+
+	// Debug: Print all settings before unmarshaling
+	log.Printf("All settings before unmarshal: %+v", viper.AllSettings())
 
 	// Unmarshal config
 	if err := viper.Unmarshal(c); err != nil {
+		log.Printf("Error unmarshaling config: %v", err)
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
+	log.Printf("Final config - Debug: %v, LogLevel: %s, OutputDir: %s", c.Debug, c.LogLevel, c.OutputDir)
 	return c, nil
 }
 

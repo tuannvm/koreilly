@@ -1,0 +1,12 @@
+debug: true
+log_level: debug
+output_dir: ./books
+
+# Optional Gmail settings for sending to Kindle
+gmail:
+  email: ""
+  password: ""
+
+# Optional Kindle email
+kindle:
+  email: ""
