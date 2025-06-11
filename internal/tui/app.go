@@ -114,13 +114,21 @@ func (a *App) Init() tea.Cmd {
 // Update handles updates
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	// -----------------------------------------------------------------
+	// Keyboard input
+	// -----------------------------------------------------------------
 	case tea.KeyMsg:
-		// Always pass key events to the search input when we're on the main screen,
-		// so typing immediately edits the field.
+		// Quit works from anywhere.
+		if key.Matches(msg, keys.Quit) {
+			return a, tea.Quit
+		}
+
+		// MAIN (search) screen: send all keys to the search input first.
 		if a.current == "main" {
 			var cmd tea.Cmd
 			a.searchInput, cmd = a.searchInput.Update(msg)
-			// If user hit Enter we still want to trigger the search handler.
+
 			if key.Matches(msg, keys.Enter) {
 				_, searchCmd := a.handleSearch()
 				cmd = tea.Batch(cmd, searchCmd)
@@ -128,19 +136,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		switch {
-		case key.Matches(msg, keys.Quit):
-			return a, tea.Quit
-		case key.Matches(msg, keys.Enter):
-			if a.current == "auth" {
-				if a.activeInput == "username" {
-					a.activeInput = "password"
-					return a, nil
-				}
-				return a.handleAuth()
-			}
-		case key.Matches(msg, keys.Tab):
-			if a.current == "auth" {
+		// AUTH screen behaviour.
+		if a.current == "auth" {
+			// Tab switches focus.
+			if key.Matches(msg, keys.Tab) {
 				if a.activeInput == "username" {
 					a.activeInput = "password"
 				} else {
@@ -148,19 +147,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, nil
 			}
+
+			// Enter either hops to password or triggers login.
+			if key.Matches(msg, keys.Enter) {
+				if a.activeInput == "username" {
+					a.activeInput = "password"
+					return a, nil
+				}
+				return a.handleAuth()
+			}
 		}
 
-	// Handle authentication response
+	// -----------------------------------------------------------------
+	// Custom messages
+	// -----------------------------------------------------------------
 	case authError:
 		a.err = msg.err
 		a.current = "auth"
 		return a, nil
 
 	case *auth.Token:
-		// Successful authentication
 		a.current = "main"
-		a.err = nil
-		return a, tea.Quit // For now, just quit on successful auth
+		return a, nil
 
 	case searchResultMsg:
 		a.isLoading = false
@@ -172,7 +180,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Update the current input
+	// -----------------------------------------------------------------
+	// Fallback: let sub-models process the message
+	// -----------------------------------------------------------------
 	var cmd tea.Cmd
 	if a.current == "auth" {
 		if a.activeInput == "username" {
