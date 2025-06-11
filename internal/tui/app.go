@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tuannvm/goreilly/internal/services/oreilly"
+
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -28,6 +30,7 @@ type App struct {
 	// Sub-models
 	usernameInput textinput.Model
 	passwordInput textinput.Model
+	searchInput   textinput.Model
 	spinner       spinner.Model
 
 	// States
@@ -35,14 +38,19 @@ type App struct {
 	activeInput string // 'username' or 'password'
 	isLoading   bool
 	message     string
+	results     []string
 }
 
 // NewApp creates a new TUI application
-func NewApp(cfg *config.Config, authSvc *auth.Service) (*App, error) {
+func NewApp(cfg *config.Config, authSvc *auth.Service, startMain bool) (*App, error) {
+	initialState := "auth"
+	if startMain {
+		initialState = "main"
+	}
 	a := &App{
 		cfg:         cfg,
 		authSvc:     authSvc,
-		current:     "auth",
+		current:     initialState,
 		activeInput: "username",
 	}
 
@@ -63,6 +71,15 @@ func NewApp(cfg *config.Config, authSvc *auth.Service) (*App, error) {
 	a.passwordInput.EchoCharacter = '•'
 	a.passwordInput.Prompt = "Password: "
 
+	// Initialize search input
+	a.searchInput = textinput.New()
+	a.searchInput.Placeholder = "Search O'Reilly (press Enter)"
+	a.searchInput.CharLimit = 100
+	a.searchInput.Width = 60
+	a.searchInput.Prompt = "Search: "
+	if startMain {
+		a.searchInput.Focus()
+	}
 	// Initialize spinner
 	a.spinner = spinner.New()
 	a.spinner.Spinner = spinner.Dot
@@ -98,6 +115,19 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Always pass key events to the search input when we're on the main screen,
+		// so typing immediately edits the field.
+		if a.current == "main" {
+			var cmd tea.Cmd
+			a.searchInput, cmd = a.searchInput.Update(msg)
+			// If user hit Enter we still want to trigger the search handler.
+			if key.Matches(msg, keys.Enter) {
+				_, searchCmd := a.handleSearch()
+				cmd = tea.Batch(cmd, searchCmd)
+			}
+			return a, cmd
+		}
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return a, tea.Quit
@@ -131,6 +161,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.current = "main"
 		a.err = nil
 		return a, tea.Quit // For now, just quit on successful auth
+
+	case searchResultMsg:
+		a.isLoading = false
+		if msg.err != nil {
+			a.err = msg.err
+		} else {
+			a.results = msg.results
+		}
+		return a, nil
 	}
 
 	// Update the current input
@@ -141,6 +180,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.passwordInput, cmd = a.passwordInput.Update(msg)
 		}
+	} else if a.current == "main" {
+		a.searchInput, cmd = a.searchInput.Update(msg)
 	}
 
 	return a, cmd
@@ -159,6 +200,8 @@ func (a *App) View() string {
 		return fmt.Sprintf("\n   %s Authenticating... (press q to quit)\n", a.spinner.View())
 	case "auth":
 		s = a.authView()
+	case "main":
+		s = a.searchView()
 	default:
 		s = "Loading...\n"
 	}
@@ -216,6 +259,30 @@ Google Chrome (SSO flow):
 (Users with legacy non-SSO accounts may still log in with email/password using the old flow.)`
 
 	return fmt.Sprintf("%s\n\n%s\n", header, strings.TrimSpace(instructions))
+}
+
+// searchView renders the main search interface
+func (a *App) searchView() string {
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("205")).
+		MarginBottom(1)
+
+	header := headerStyle.Render("Search O'Reilly (Press q to quit)")
+
+	// Build results list
+	var sb strings.Builder
+	for _, line := range a.results {
+		sb.WriteString("  • ")
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+	list := sb.String()
+	if list == "" {
+		list = lipgloss.NewStyle().Faint(true).Render("No results yet. Type a query and press Enter.")
+	}
+
+	return fmt.Sprintf("%s\n%s\n\n%s", header, a.searchInput.View(), list)
 }
 
 // handleAuth handles the authentication flow
@@ -279,6 +346,43 @@ func (a *App) handleAuth() (tea.Model, tea.Cmd) {
 	)
 }
 
+// handleSearch processes the search query and fetches results
+func (a *App) handleSearch() (tea.Model, tea.Cmd) {
+	query := strings.TrimSpace(a.searchInput.Value())
+	if query == "" {
+		a.setError("Please enter a search query.")
+		return a, nil
+	}
+
+	a.err = nil
+	a.isLoading = true
+
+	return a, tea.Batch(
+		a.spinner.Tick,
+		func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			tok, err := a.authSvc.GetToken()
+			if err != nil {
+				return searchResultMsg{err: fmt.Errorf("not authenticated")}
+			}
+
+			oreillySvc, _ := oreilly.NewService()
+			resp, err := oreillySvc.SearchBooks(ctx, tok.AccessToken, query, 5)
+			if err != nil {
+				return searchResultMsg{err: err}
+			}
+
+			var lines []string
+			for i, r := range resp.Results {
+				lines = append(lines, fmt.Sprintf("%d. %s — %s", i+1, r.Title, r.Author))
+			}
+			return searchResultMsg{results: lines}
+		},
+	)
+}
+
 // Helper function to set an error message
 func (a *App) setError(msg string) {
 	a.err = fmt.Errorf("%s", msg)
@@ -315,6 +419,18 @@ type keyMap struct {
 // authError wraps an authentication error for the TUI
 type authError struct {
 	err error
+}
+
+type searchResultMsg struct {
+	results []string
+	err     error
+}
+
+// ForceMain transitions the UI directly to the main search screen, bypassing
+// the authentication instructions. Call this after verifying an existing
+// valid authentication token.
+func (a *App) ForceMain() {
+	a.current = "main"
 }
 
 // Error returns the error message

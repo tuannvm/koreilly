@@ -45,16 +45,11 @@ func Run() error {
 		return fmt.Errorf("failed to initialize auth service: %w", err)
 	}
 
-	// If we already have a valid token, skip the login TUI entirely.
-	if authSvc.IsAuthenticated() {
-		msg := "You are already authenticated! (orm-jwt cookie found).\nMain book browsing features are not implemented yet."
-		fmt.Println(msg)
-		log.Println(msg)
-		return nil
-	}
+	// Determine starting view: if a token exists, jump directly to main search UI.
+	startMain := authSvc.IsAuthenticated()
 
 	// Initialize TUI
-	ui, err := tui.NewApp(cfg, authSvc)
+	ui, err := tui.NewApp(cfg, authSvc, startMain)
 	if err != nil {
 		return fmt.Errorf("failed to initialize TUI: %w", err)
 	}
