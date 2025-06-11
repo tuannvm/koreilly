@@ -90,25 +90,25 @@ func (r *RetryPolicy) CalculateBackoff(attempt int) time.Duration {
 // DefaultRetryPolicy returns a sensible default retry policy
 func DefaultRetryPolicy() *RetryPolicy {
 	return &RetryPolicy{
-		MaxRetries:         3,
+		MaxRetries:           3,
 		RetryableStatusCodes: []int{500, 502, 503, 504},
-		InitialBackoff:     100 * time.Millisecond,
-		MaxBackoff:         5 * time.Second,
+		InitialBackoff:       100 * time.Millisecond,
+		MaxBackoff:           5 * time.Second,
 	}
 }
 
 // New creates a new HTTP client with the specified configuration
 func New(baseURL string, opts ...Option) *Client {
 	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
-	
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 		},
 		DisableCompression: false,
 		ForceAttemptHTTP2:  true,
-		MaxIdleConns:        10,
-		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConns:       10,
+		IdleConnTimeout:    30 * time.Second,
 	}
 
 	httpClient := &http.Client{
@@ -153,6 +153,11 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client, opts ...Option) 
 
 // Option configures the Client
 type Option func(*Client)
+
+// GetHTTPClient exposes the underlying http.Client for advanced use.
+func (c *Client) GetHTTPClient() *http.Client {
+	return c.client
+}
 
 // WithHTTPClient sets a custom HTTP client
 func WithHTTPClient(httpClient *http.Client) Option {
@@ -301,7 +306,7 @@ func (c *Client) PostWithHeaders(ctx context.Context, path string, headers map[s
 	// Read the entire body into memory so we can reuse it for retries
 	var bodyBytes []byte
 	var err error
-	
+
 	if body != nil {
 		bodyBytes, err = io.ReadAll(body)
 		if err != nil {

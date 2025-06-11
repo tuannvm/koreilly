@@ -45,6 +45,14 @@ func Run() error {
 		return fmt.Errorf("failed to initialize auth service: %w", err)
 	}
 
+	// If we already have a valid token, skip the login TUI entirely.
+	if authSvc.IsAuthenticated() {
+		msg := "You are already authenticated! (orm-jwt cookie found).\nMain book browsing features are not implemented yet."
+		fmt.Println(msg)
+		log.Println(msg)
+		return nil
+	}
+
 	// Initialize TUI
 	ui, err := tui.NewApp(cfg, authSvc)
 	if err != nil {
@@ -88,4 +96,25 @@ func setupLogger(cfg *config.Config) {
 	}
 
 	log.Printf("Logging initialized. Debug mode: %v", cfg.Debug)
+}
+
+// ImportCookie loads a Netscape-format cookie file and stores the JWT token for future use.
+func ImportCookie(cookieSrc string) error {
+	// Currently supports only a direct file path; browser extraction can be added later.
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	authSvc, err := auth.NewService(cfg)
+	if err != nil {
+		return fmt.Errorf("init auth service: %w", err)
+	}
+
+	if _, err := authSvc.TokenFromCookieFile(cookieSrc); err != nil {
+		return fmt.Errorf("import cookie: %w", err)
+	}
+
+	log.Printf("Cookie imported successfully from %s", cookieSrc)
+	return nil
 }

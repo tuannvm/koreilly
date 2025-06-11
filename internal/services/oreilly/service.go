@@ -3,13 +3,12 @@ package oreilly
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -18,18 +17,18 @@ import (
 )
 
 const (
-	defaultBaseURL    = "https://www.oreilly.com"
-	safariBaseURL     = "https://learning.oreilly.com"
-	loginPage         = "/member/auth/login/"
-	loginEntryURL     = "/member/auth/login/"
-	profileURL        = "/profile/"
-	apiBaseURL        = "https://api.oreilly.com"
-	userAgent         = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-	acceptHeader      = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
-	acceptLangHeader  = "en-US,en;q=0.5"
-	connectionHeader  = "keep-alive"
+	defaultBaseURL   = "https://www.oreilly.com"
+	safariBaseURL    = "https://learning.oreilly.com"
+	loginPage        = "/member/auth/login/"
+	loginEntryURL    = "/member/auth/login/"
+	profileURL       = "/profile/"
+	apiBaseURL       = "https://api.oreilly.com"
+	userAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+	acceptHeader     = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
+	acceptLangHeader = "en-US,en;q=0.5"
+	connectionHeader = "keep-alive"
 	upgradeInsecure  = "1"
-	contentTypeForm   = "application/x-www-form-urlencoded"
+	contentTypeForm  = "application/x-www-form-urlencoded"
 )
 
 // Service represents the O'Reilly service
@@ -104,135 +103,130 @@ func NewService() (*Service, error) {
 	}, nil
 }
 
-// getCSRFToken retrieves the CSRF token from the O'Reilly website
-// Since the login page is a JavaScript-rendered SPA, we need to make a POST request to the login endpoint
-// with the correct headers and form data to get the authentication token
-func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
-	loginPage := "https://learning.oreilly.com/accounts/login/"
+// getCSRFToken is now unused (CSRF is not required in new login flow)
 
-	// Initial GET to fetch login page + cookies
-	headers := map[string]string{
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.9",
-		"User-Agent":      userAgent,
-	}
-
-	log.Printf("Fetching login page to obtain CSRF token: %s", loginPage)
-	resp, err := s.client.Get(ctx, loginPage, headers)
-	if err != nil {
-		return "", fmt.Errorf("failed to GET login page: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed reading login page: %w", err)
-	}
-
-	// First check for csrftoken cookie (Django style)
-	var token string
-	for _, c := range resp.Cookies() {
-		if c.Name == "csrftoken" {
-			token = c.Value
-			break
-		}
-	}
-
-	// If not in cookie, fallback to hidden input parsing
-	if token == "" {
-		re := regexp.MustCompile(`name=['"]csrfmiddlewaretoken['"][^>]*value=['"]([^'"]+)`)
-		m := re.FindStringSubmatch(string(body))
-		if len(m) >= 2 {
-			token = m[1]
-		}
-	}
-
-	if token == "" {
-		return "", fmt.Errorf("csrfmiddlewaretoken not found (cookie or form)")
-	}
-
-	log.Printf("Obtained CSRF token: %s", token[:min(10, len(token))])
-	return token, nil
-}
-
-// Login authenticates with O'Reilly using email and password
+// Login authenticates with O'Reilly using email and password with SafariBooks multi-step method.
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResponse, error) {
-	// The login endpoint for O'Reilly's API
-	loginURL := "https://learning.oreilly.com/accounts/login/"
-
-	// Get fresh CSRF token & cookies first
-	csrfToken, err := s.getCSRFToken(ctx)
+	// Step 1: GET the unified login page to establish cookies
+	unifiedLoginURL := "https://learning.oreilly.com/login/unified/?next=/home/"
+	req, err := http.NewRequestWithContext(ctx, "GET", unifiedLoginURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve CSRF token: %w", err)
+		return nil, fmt.Errorf("failed to construct GET for unified login: %w", err)
 	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	resp, err := s.client.GetHTTPClient().Do(req)
+	if err != nil {
+		log.Printf("GET unified login page failed: %v", err)
+		return nil, fmt.Errorf("failed to GET unified login page: %w", err)
+	}
+	log.Printf("[Unified Login GET] Status: %v", resp.Status)
+	for k, v := range resp.Header {
+		log.Printf("[Unified Login GET] Header: %s=%v", k, v)
+	}
+	for i, c := range resp.Cookies() {
+		log.Printf("[Unified Login GET] Cookie[%d]: %s=%s", i, c.Name, c.Value)
+	}
+	_ = resp.Body.Close()
 
-	// Prepare the form data
-	formData := url.Values{}
-	formData.Set("csrfmiddlewaretoken", csrfToken)
-	formData.Set("email", email)
-	formData.Set("password", password)
-	formData.Set("next", "/")
-
-	// Set up headers for the login request
+	// Step 2: POST creds as JSON to real login endpoint with redirect_uri
+	loginURL := "https://www.oreilly.com/member/auth/login/"
+	redirectUri := "https://api.oreilly.com%2Fhome%2F" // URL-encoded /home/
+	loginPayload := fmt.Sprintf(`{"email":%q,"password":%q,"redirect_uri":%q}`, email, password, redirectUri)
 	headers := map[string]string{
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.9",
-		"Content-Type":    "application/x-www-form-urlencoded",
-		"Origin":          "https://learning.oreilly.com",
-		"Referer":         "https://learning.oreilly.com/accounts/login/",
+		"Accept":       "application/json, text/javascript, */*; q=0.01",
+		"Content-Type": "application/json",
+		"User-Agent":   userAgent,
+		"Referer":      unifiedLoginURL,
 	}
-
-	// Make the login request
-	log.Printf("Sending login request to %s", loginURL)
-	resp, err := s.client.PostWithHeaders(ctx, loginURL, headers, strings.NewReader(formData.Encode()))
+	log.Printf("Posting JSON login to %s", loginURL)
+	resp, err = s.client.PostWithHeaders(ctx, loginURL, headers, strings.NewReader(loginPayload))
 	if err != nil {
-		return nil, fmt.Errorf("login request failed: %w", err)
+		log.Printf("[Login JSON POST] Network error: %v", err)
+		return nil, fmt.Errorf("login JSON POST failed: %w", err)
+	}
+	log.Printf("[Login JSON POST] Status: %v", resp.Status)
+	for k, v := range resp.Header {
+		log.Printf("[Login JSON POST] Header: %s=%v", k, v)
+	}
+	for i, c := range resp.Cookies() {
+		log.Printf("[Login JSON POST] Cookie[%d]: %s=%s", i, c.Name, c.Value)
 	}
 	defer resp.Body.Close()
 
-	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read login response: %w", err)
+		log.Printf("[Login JSON POST] Error reading body: %v", err)
+		return nil, fmt.Errorf("failed to read JSON login response: %w", err)
 	}
-
-	// Log the response status and headers for debugging
-	log.Printf("Login response status: %s", resp.Status)
-	log.Printf("Response headers: %+v", resp.Header)
-
-	// Check for successful login by looking for the user menu in the response
-	if !strings.Contains(string(body), "account-dropdown-button") {
-		// If we don't see the account dropdown, the login likely failed
-		// Try to extract an error message from the response
-		errMsg := "login failed - unknown error"
-		if strings.Contains(string(body), "Please enter a correct email and password") {
-			errMsg = "invalid email or password"
-		} else if strings.Contains(string(body), "This account is inactive") {
-			errMsg = "account is inactive"
+	log.Printf("[Login JSON POST] Status: %d, Body (first 350): %.350s", resp.StatusCode, string(body))
+	if resp.StatusCode != 200 {
+		if strings.Contains(string(body), "inactive") {
+			return nil, fmt.Errorf("login failed: account is inactive")
 		}
-		return nil, fmt.Errorf("login failed: %s", errMsg)
+		if strings.Contains(string(body), "incorrect") || strings.Contains(string(body), "Invalid") {
+			return nil, fmt.Errorf("login failed: invalid email or password")
+		}
+		return nil, fmt.Errorf("login failed: unexpected response status %d", resp.StatusCode)
 	}
 
-	// If we get here, the login was successful
-	// Extract the JWT token from cookies
+	// Parse JSON; expect {"access_token": "...", "token_type": "...", "redirect_uri": ...}
+	var parsed struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		RedirectUri string `json:"redirect_uri"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("could not parse login response: %w", err)
+	}
+	if parsed.AccessToken == "" || parsed.RedirectUri == "" {
+		return nil, fmt.Errorf("login: missing token or redirect URI")
+	}
+
+	// Step 3: GET the redirect URI to finalize the session (sets cookies)
+	finalizeURL := parsed.RedirectUri
+	log.Printf("Following login redirect (finalize session): %s", finalizeURL)
+	req2, err := http.NewRequestWithContext(ctx, "GET", finalizeURL, nil)
+	if err != nil {
+		log.Printf("[Finalize GET] Build error: %v", err)
+		return nil, fmt.Errorf("failed to build finalize session GET: %w", err)
+	}
+	req2.Header.Set("User-Agent", userAgent)
+	resp2, err := s.client.GetHTTPClient().Do(req2)
+	if err != nil {
+		log.Printf("[Finalize GET] Network error: %v", err)
+		return nil, fmt.Errorf("GET finalize redirect failed: %w", err)
+	}
+	log.Printf("[Finalize GET] Status: %v", resp2.Status)
+	for k, v := range resp2.Header {
+		log.Printf("[Finalize GET] Header: %s=%v", k, v)
+	}
+	for i, c := range resp2.Cookies() {
+		log.Printf("[Finalize GET] Cookie[%d]: %s=%s", i, c.Name, c.Value)
+	}
+	_ = resp2.Body.Close()
+
+	// Step 4: Look for jwt token in cookies
 	var jwtToken string
 	for _, cookie := range s.client.GetCookies("https://learning.oreilly.com") {
-		log.Printf("Found cookie: %s=%s", cookie.Name, cookie.Value)
-		if cookie.Name == "orm-jwt" || cookie.Name == "orm-rt" {
+		log.Printf("Final Check Cookie: %s=%s", cookie.Name, cookie.Value)
+		if cookie.Name == "orm-jwt" {
 			jwtToken = cookie.Value
 			break
 		}
 	}
-
 	if jwtToken == "" {
-		return nil, fmt.Errorf("login successful but no JWT token found in cookies")
+		// As fallback, return access_token (valid for API use, not browser flows)
+		jwtToken = parsed.AccessToken
 	}
-
-	log.Printf("Successfully logged in as %s", email)
+	if jwtToken == "" {
+		return nil, fmt.Errorf("login failed: no valid token found after login flow")
+	}
 	return &LoginResponse{
 		AccessToken: jwtToken,
-		TokenType:   "Bearer",
-		ExpiresIn:   3600, // Default expiration time
+		TokenType:   parsed.TokenType,
+		ExpiresIn:   3600,
 	}, nil
 }
 
@@ -241,7 +235,7 @@ func (s *Service) verifyLogin(ctx context.Context) error {
 	// Try to access the profile page
 	profileURL := "https://www.oreilly.com/member/profile/"
 	headers := map[string]string{
-		"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.9",
 	}
 

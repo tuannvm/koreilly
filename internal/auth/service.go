@@ -55,7 +55,7 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 		AccessToken: resp.AccessToken,
 		TokenType:   resp.TokenType,
 		ExpiresIn:   resp.ExpiresIn,
-		ExpiresAt:  time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second),
+		ExpiresAt:   time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second),
 	}
 
 	// Save the token
@@ -144,9 +144,50 @@ func (s *Service) tokenPath() (string, error) {
 }
 
 // Errors
+func (s *Service) TokenFromCookieFile(cookiePath string) (*Token, error) {
+	cookies, err := LoadCookieFile(cookiePath)
+	if err != nil {
+		return nil, fmt.Errorf("load cookie file: %w", err)
+	}
+
+	var jwt string
+	var exp time.Time
+	for _, c := range cookies {
+		if c.Name == "orm-jwt" {
+			jwt = c.Value
+			exp = c.Expires
+			break
+		}
+	}
+
+	if jwt == "" {
+		return nil, ErrInvalidToken
+	}
+
+	// If no expiry provided, assume one hour validity.
+	if exp.IsZero() {
+		exp = time.Now().Add(1 * time.Hour)
+	}
+
+	token := &Token{
+		AccessToken: jwt,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(time.Until(exp).Seconds()),
+		ExpiresAt:   exp,
+	}
+
+	// Persist locally so the regular flow can reuse it.
+	if err := s.saveToken(token); err != nil {
+		return nil, err
+	}
+
+	return token, nil
+}
+
+// Errors
 var (
-	ErrNotAuthenticated = NewAuthError("not authenticated")
-	ErrInvalidToken    = NewAuthError("invalid token")
+	ErrNotAuthenticated   = NewAuthError("not authenticated")
+	ErrInvalidToken       = NewAuthError("invalid token")
 	ErrInvalidCredentials = NewAuthError("invalid username or password")
 )
 

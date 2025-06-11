@@ -28,7 +28,7 @@ type App struct {
 	// Sub-models
 	usernameInput textinput.Model
 	passwordInput textinput.Model
-	spinner      spinner.Model
+	spinner       spinner.Model
 
 	// States
 	err         error
@@ -48,7 +48,7 @@ func NewApp(cfg *config.Config, authSvc *auth.Service) (*App, error) {
 
 	// Initialize username input
 	a.usernameInput = textinput.New()
-	a.usernameInput.Placeholder = "Enter your O'Reilly email"
+	a.usernameInput.Placeholder = "Legacy O'Reilly email (non-SSO)"
 	a.usernameInput.Focus()
 	a.usernameInput.CharLimit = 100
 	a.usernameInput.Width = 50
@@ -56,7 +56,7 @@ func NewApp(cfg *config.Config, authSvc *auth.Service) (*App, error) {
 
 	// Initialize password input
 	a.passwordInput = textinput.New()
-	a.passwordInput.Placeholder = "Enter your O'Reilly password"
+	a.passwordInput.Placeholder = "Legacy password"
 	a.passwordInput.CharLimit = 100
 	a.passwordInput.Width = 50
 	a.passwordInput.EchoMode = textinput.EchoPassword
@@ -199,75 +199,23 @@ func (a *App) authView() string {
 		MarginBottom(1)
 
 	header := headerStyle.Render("Welcome to Goreilly!")
-	subHeader := lipgloss.NewStyle().MarginBottom(2).Render("Please enter your O'Reilly credentials to continue.")
 
-	// Sanitize error message if it exists
-	if a.err != nil {
-		a.err = errors.New(sanitizeError(a.err))
-	}
+	instructions := `
+Google Chrome (SSO flow):
 
-	// Create a styled box for the login form
-	formStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
-		Padding(1, 2).
-		Margin(1, 0)
+  1. Visit https://learning.oreilly.com and sign in with your organisation’s SSO.
+  2. Install the free “EditThisCookie” extension from the Chrome Web Store
+     (or any tool that can export cookies).
+  3. Click the 🍪 icon → Export → select “Netscape” format.
+     This saves all cookies for learning.oreilly.com, including the “orm-jwt”.
+  4. Move the exported file somewhere convenient, e.g. ~/Downloads/oreilly_cookies.txt
+  5. In your terminal run:
+        goreilly cookie import ~/Downloads/oreilly_cookies.txt
+  6. Restart Goreilly and you’re ready to search & download.
 
-	// Style for input labels
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).MarginRight(2)
+(Users with legacy non-SSO accounts may still log in with email/password using the old flow.)`
 
-	// Only show cursor in the active input field
-	usernameInput := a.usernameInput
-	passwordInput := a.passwordInput
-
-	if a.activeInput == "username" {
-		usernameInput.Focus()
-		passwordInput.Blur()
-	} else {
-		usernameInput.Blur()
-		passwordInput.Focus()
-	}
-
-	// Render the username and password inputs
-	inputs := []string{
-		fmt.Sprintf("%s\n%s", 
-			labelStyle.Render("Email"),
-			usernameInput.View(),
-		),
-		"",
-		fmt.Sprintf("%s\n%s",
-			labelStyle.Render("Password"),
-			passwordInput.View(),
-		),
-	}
-
-	// Add loading spinner if authenticating
-	if a.isLoading {
-		inputs = append(inputs, "", fmt.Sprintf("  %s Authenticating...", a.spinner.View()))
-	}
-
-	// Add status message if any
-	if a.message != "" {
-		msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).MarginTop(1)
-		inputs = append(inputs, "", msgStyle.Render(a.message))
-	}
-
-	// Add help text
-	helpText := lipgloss.NewStyle().Faint(true).Render("↑/↓: Navigate • Enter: Login • Tab: Switch Field • q: Quit")
-	inputs = append(inputs, "", helpText)
-
-	// Combine everything
-	form := formStyle.Render(strings.Join(inputs, "\n"))
-
-	// Show error if any
-	if a.err != nil {
-		errMsg := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Render(fmt.Sprintf("Error: %v", a.err))
-		form = fmt.Sprintf("%s\n\n%s", form, errMsg)
-	}
-
-	return fmt.Sprintf("%s\n%s\n\n%s", header, subHeader, form)
+	return fmt.Sprintf("%s\n\n%s\n", header, strings.TrimSpace(instructions))
 }
 
 // handleAuth handles the authentication flow
@@ -321,11 +269,11 @@ func (a *App) handleAuth() (tea.Model, tea.Cmd) {
 
 			// Show success message
 			a.message = fmt.Sprintf("Login successful! Welcome, %s", username)
-			
+
 			// Here you would typically transition to the main app view
 			// For now, we'll just show a success message
 			time.Sleep(2 * time.Second) // Show success message briefly
-			
+
 			return token // Return the token on success
 		},
 	)
@@ -333,7 +281,7 @@ func (a *App) handleAuth() (tea.Model, tea.Cmd) {
 
 // Helper function to set an error message
 func (a *App) setError(msg string) {
-	a.err = fmt.Errorf(msg)
+	a.err = fmt.Errorf("%s", msg)
 	a.isLoading = false
 }
 
