@@ -135,12 +135,11 @@ func (s *Service) saveToken(token *Token) error {
 }
 
 func (s *Service) tokenPath() (string, error) {
-	configDir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-
-	return filepath.Join(configDir, "koreilly", "token.json"), nil
+	return filepath.Join(home, ".config", "goreilly", "token.json"), nil
 }
 
 // Errors
