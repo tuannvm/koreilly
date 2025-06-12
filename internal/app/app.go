@@ -1,13 +1,11 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
+
 	"time"
 
 	"github.com/tuannvm/goreilly/internal/auth"
@@ -17,18 +15,6 @@ import (
 
 // Run initializes and runs the application.
 func Run() error {
-	// Set up context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle interrupt signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal %s, shutting down...\n", sig)
-		cancel()
-	}()
 
 	// Initialize configuration
 	cfg, err := config.Load()
@@ -45,19 +31,13 @@ func Run() error {
 		return fmt.Errorf("failed to initialize auth service: %w", err)
 	}
 
-	// Determine starting view: if a token exists, jump directly to main search UI.
-	startMain := authSvc.IsAuthenticated()
-
 	// Initialize TUI
-	ui, err := tui.NewApp(cfg, authSvc, startMain)
-	if err != nil {
-		return fmt.Errorf("failed to initialize TUI: %w", err)
-	}
+	ui := tui.NewApp(authSvc)
 
 	log.Println("Starting GOReily...")
 
 	// Run the application
-	if err := ui.Run(ctx); err != nil {
+	if err := ui.Run(); err != nil {
 		return fmt.Errorf("application error: %w", err)
 	}
 

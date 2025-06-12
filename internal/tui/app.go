@@ -2,448 +2,190 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
+	"github.com/tuannvm/goreilly/internal/auth"
 	"github.com/tuannvm/goreilly/internal/services/oreilly"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/tuannvm/goreilly/internal/auth"
-	"github.com/tuannvm/goreilly/internal/config"
 )
 
-// App represents the main TUI application
-type App struct {
-	cfg      *config.Config
-	authSvc  *auth.Service
-	current  string
-	quitting bool
-
-	// Sub-models
-	usernameInput textinput.Model
-	passwordInput textinput.Model
-	searchInput   textinput.Model
-	spinner       spinner.Model
-
-	// States
-	err         error
-	activeInput string // 'username' or 'password'
-	isLoading   bool
-	message     string
-	results     []string
+// BookItem wraps a single search result and implements list.Item.
+type BookItem struct {
+	TitleText string
+	Author    string
+	Slug      string
 }
 
-// NewApp creates a new TUI application
-func NewApp(cfg *config.Config, authSvc *auth.Service, startMain bool) (*App, error) {
-	initialState := "auth"
-	if startMain {
-		initialState = "main"
-	}
-	a := &App{
-		cfg:         cfg,
-		authSvc:     authSvc,
-		current:     initialState,
-		activeInput: "username",
-	}
+func (b BookItem) Title() string       { return b.TitleText }
+func (b BookItem) Description() string { return b.Author }
+func (b BookItem) FilterValue() string { return b.TitleText }
 
-	// Initialize username input
-	a.usernameInput = textinput.New()
-	a.usernameInput.Placeholder = "Legacy O'Reilly email (non-SSO)"
-	a.usernameInput.Focus()
-	a.usernameInput.CharLimit = 100
-	a.usernameInput.Width = 50
-	a.usernameInput.Prompt = "Email: "
+// searchResultMsg carries items or an error from the async search.
+type searchResultMsg struct {
+	items []BookItem
+	err   error
+}
 
-	// Initialize password input
-	a.passwordInput = textinput.New()
-	a.passwordInput.Placeholder = "Legacy password"
-	a.passwordInput.CharLimit = 100
-	a.passwordInput.Width = 50
-	a.passwordInput.EchoMode = textinput.EchoPassword
-	a.passwordInput.EchoCharacter = '•'
-	a.passwordInput.Prompt = "Password: "
+// App is the interactive search TUI model.
+type App struct {
+	authSvc     *auth.Service
+	searchInput textinput.Model
+	spinner     spinner.Model
+	books       list.Model
+	inList      bool
+	err         error
+}
 
-	// Initialize search input
+// NewApp constructs the App, setting up inputs and list.
+func NewApp(authSvc *auth.Service) *App {
+	a := &App{authSvc: authSvc}
+
+	// Search box
 	a.searchInput = textinput.New()
-	a.searchInput.Placeholder = "Search O'Reilly (press Enter)"
-	a.searchInput.CharLimit = 100
-	a.searchInput.Width = 60
+	a.searchInput.Placeholder = "Enter search query"
 	a.searchInput.Prompt = "Search: "
-	if startMain {
-		a.searchInput.Focus()
-	}
-	// Initialize spinner
+	a.searchInput.Width = 40
+	a.searchInput.CharLimit = 100
+	a.searchInput.Focus()
+
+	// Spinner
 	a.spinner = spinner.New()
 	a.spinner.Spinner = spinner.Dot
-	a.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	// Interactive list
+	delegate := list.NewDefaultDelegate()
+	a.books = list.New(nil, delegate, 60, 12)
+	a.books.Title = "Results (↑/↓, Enter: select, Esc: search, q: quit)"
+
+	return a
+}
+
+// Init runs any startup commands.
+func (a *App) Init() tea.Cmd {
+	return tea.Batch(a.spinner.Tick, textinput.Blink)
+}
+
+func (a *App) Run() error {
+	p := tea.NewProgram(a, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
+}
+
+// Update handles all messages: key events and search results.
+func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	// Handle keyboard
+	case tea.KeyMsg:
+		// Quit anytime
+		if key.Matches(msg, key.NewBinding(key.WithKeys("q", "ctrl+c"))) {
+			return a, tea.Quit
+		}
+
+		// If search results are displayed, route to list
+		if a.inList {
+			booksModel, cmd := a.books.Update(msg)
+			a.books = booksModel
+
+			// Enter to select a book
+			if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
+				if it, ok := a.books.SelectedItem().(BookItem); ok {
+					return a, func() tea.Msg {
+						return downloadRequestMsg{Slug: it.Slug, Title: it.TitleText}
+					}
+				}
+			}
+			// Esc returns to search input
+			if key.Matches(msg, key.NewBinding(key.WithKeys("esc"))) {
+				a.inList = false
+				a.searchInput.Focus()
+				return a, nil
+			}
+
+			return a, cmd
+		}
+
+		// Otherwise handle search input
+		if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
+			// Kick off async search
+			return a, func() tea.Msg {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+
+				tok, err := a.authSvc.GetToken()
+				if err != nil {
+					return searchResultMsg{nil, err}
+				}
+				svc, _ := oreilly.NewService()
+				res, err := svc.SearchBooks(ctx, tok.AccessToken, a.searchInput.Value(), 10)
+				if err != nil {
+					return searchResultMsg{nil, err}
+				}
+
+				items := make([]BookItem, len(res.Results))
+				for i, r := range res.Results {
+					items[i] = BookItem{TitleText: r.Title, Author: r.Author, Slug: r.Slug}
+				}
+				return searchResultMsg{items, nil}
+			}
+		}
+
+		// Any other key updates the search input
+		var cmd tea.Cmd
+		a.searchInput, cmd = a.searchInput.Update(msg)
+		return a, cmd
+
+	// Search results came back
+	case searchResultMsg:
+		a.err = msg.err
+		if msg.err != nil {
+			a.inList = false
+		} else {
+			// Populate and show list
+			listItems := make([]list.Item, len(msg.items))
+			for i, it := range msg.items {
+				listItems[i] = it
+			}
+			a.books.SetItems(listItems)
+			a.inList = true
+		}
+		return a, nil
+	}
 
 	return a, nil
 }
 
-// Run starts the TUI application
-func (a *App) Run(ctx context.Context) error {
-	p := tea.NewProgram(a, tea.WithAltScreen())
-
-	// Start the spinner
-	a.spinner, _ = a.spinner.Update(spinner.Tick())
-
-	// Run the program
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("failed to start TUI: %w", err)
-	}
-
-	return nil
+// downloadRequestMsg is sent when a book is chosen.
+type downloadRequestMsg struct {
+	Slug  string
+	Title string
 }
 
-// Init initializes the TUI
-func (a *App) Init() tea.Cmd {
-	return tea.Batch(
-		a.spinner.Tick,
-		textinput.Blink,
-	)
-}
-
-// Update handles updates
-func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-
-	// -----------------------------------------------------------------
-	// Keyboard input
-	// -----------------------------------------------------------------
-	case tea.KeyMsg:
-		// Quit works from anywhere.
-		if key.Matches(msg, keys.Quit) {
-			return a, tea.Quit
-		}
-
-		// MAIN (search) screen: send all keys to the search input first.
-		if a.current == "main" {
-			var cmd tea.Cmd
-			a.searchInput, cmd = a.searchInput.Update(msg)
-
-			if key.Matches(msg, keys.Enter) {
-				_, searchCmd := a.handleSearch()
-				cmd = tea.Batch(cmd, searchCmd)
-			}
-			return a, cmd
-		}
-
-		// AUTH screen behaviour.
-		if a.current == "auth" {
-			// Tab switches focus.
-			if key.Matches(msg, keys.Tab) {
-				if a.activeInput == "username" {
-					a.activeInput = "password"
-				} else {
-					a.activeInput = "username"
-				}
-				return a, nil
-			}
-
-			// Enter either hops to password or triggers login.
-			if key.Matches(msg, keys.Enter) {
-				if a.activeInput == "username" {
-					a.activeInput = "password"
-					return a, nil
-				}
-				return a.handleAuth()
-			}
-		}
-
-	// -----------------------------------------------------------------
-	// Custom messages
-	// -----------------------------------------------------------------
-	case authError:
-		a.err = msg.err
-		a.current = "auth"
-		return a, nil
-
-	case *auth.Token:
-		a.current = "main"
-		return a, nil
-
-	case searchResultMsg:
-		a.isLoading = false
-		if msg.err != nil {
-			a.err = msg.err
-		} else {
-			a.results = msg.results
-		}
-		return a, nil
-	}
-
-	// -----------------------------------------------------------------
-	// Fallback: let sub-models process the message
-	// -----------------------------------------------------------------
-	var cmd tea.Cmd
-	if a.current == "auth" {
-		if a.activeInput == "username" {
-			a.usernameInput, cmd = a.usernameInput.Update(msg)
-		} else {
-			a.passwordInput, cmd = a.passwordInput.Update(msg)
-		}
-	} else if a.current == "main" {
-		a.searchInput, cmd = a.searchInput.Update(msg)
-	}
-
-	return a, cmd
-}
-
-// View renders the TUI
+// View renders the TUI based on current state.
 func (a *App) View() string {
-	if a.quitting {
-		return "Goodbye!\n"
-	}
-
-	var s string
-
-	switch a.current {
-	case "loading":
-		return fmt.Sprintf("\n   %s Authenticating... (press q to quit)\n", a.spinner.View())
-	case "auth":
-		s = a.authView()
-	case "main":
-		s = a.searchView()
-	default:
-		s = "Loading...\n"
-	}
-
+	header := lipgloss.NewStyle().Bold(true).
+		Render("Search O’Reilly (q: quit)")
+	input := a.searchInput.View()
 	if a.err != nil {
-		s += "\nError: " + a.err.Error() + "\n"
+		input += "\n\n" +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("196")).
+				Render(a.err.Error())
 	}
 
-	s += "\nPress q to quit.\n"
-
-	return s
-}
-
-// sanitizeError removes HTML and other unwanted characters from error messages
-func sanitizeError(err error) string {
-	if err == nil {
-		return ""
-	}
-	// Remove HTML tags
-	re := regexp.MustCompile(`<[^>]*>`)
-	clean := re.ReplaceAllString(err.Error(), "")
-	// Replace multiple spaces/newlines with a single space
-	re = regexp.MustCompile(`\s+`)
-	clean = re.ReplaceAllString(clean, " ")
-	// Trim spaces
-	clean = strings.TrimSpace(clean)
-	if clean == "" {
-		return "An unknown error occurred"
-	}
-	return clean
-}
-
-// authView renders the authentication view
-func (a *App) authView() string {
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("205")).
-		MarginBottom(1)
-
-	header := headerStyle.Render("Welcome to Goreilly!")
-
-	instructions := `
-Google Chrome (SSO flow):
-
-  1. Visit https://learning.oreilly.com and sign in with your organisation’s SSO.
-  2. Install the free “EditThisCookie” extension from the Chrome Web Store
-     (or any tool that can export cookies).
-  3. Click the 🍪 icon → Export → select “Netscape” format.
-     This saves all cookies for learning.oreilly.com, including the “orm-jwt”.
-  4. Move the exported file somewhere convenient, e.g. ~/Downloads/oreilly_cookies.txt
-  5. In your terminal run:
-        goreilly cookie import ~/Downloads/oreilly_cookies.txt
-  6. Restart Goreilly and you’re ready to search & download.
-
-(Users with legacy non-SSO accounts may still log in with email/password using the old flow.)`
-
-	return fmt.Sprintf("%s\n\n%s\n", header, strings.TrimSpace(instructions))
-}
-
-// searchView renders the main search interface
-func (a *App) searchView() string {
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("205")).
-		MarginBottom(1)
-
-	header := headerStyle.Render("Search O'Reilly (Press q to quit)")
-
-	// Build results list
-	var sb strings.Builder
-	for _, line := range a.results {
-		sb.WriteString("  • ")
-		sb.WriteString(line)
-		sb.WriteString("\n")
-	}
-	list := sb.String()
-	if list == "" {
-		list = lipgloss.NewStyle().Faint(true).Render("No results yet. Type a query and press Enter.")
+	if a.inList {
+		return fmt.Sprintf("%s\n\n%s\n\n%s",
+			header, input, a.books.View())
 	}
 
-	return fmt.Sprintf("%s\n%s\n\n%s", header, a.searchInput.View(), list)
-}
-
-// handleAuth handles the authentication flow
-func (a *App) handleAuth() (tea.Model, tea.Cmd) {
-	// Get credentials from inputs
-	username := strings.TrimSpace(a.usernameInput.Value())
-	password := strings.TrimSpace(a.passwordInput.Value())
-
-	// Validate inputs
-	if username == "" {
-		a.setError("Email is required")
-		a.usernameInput.Focus()
-		return a, nil
-	}
-	if password == "" {
-		a.setError("Password is required")
-		a.passwordInput.Focus()
-		return a, nil
-	}
-
-	// Clear any previous errors and messages
-	a.clearError()
-	a.message = ""
-	a.isLoading = true
-
-	// Start authentication in a goroutine
-	return a, tea.Batch(
-		a.spinner.Tick,
-		func() tea.Msg {
-			// This will block, so we run it in a goroutine
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			// Show a message that we're attempting to log in
-			a.message = "Attempting to log in..."
-
-			// Call the auth service
-			token, err := a.authSvc.Authenticate(ctx, username, password)
-			if err != nil {
-				// Check for common error types and provide user-friendly messages
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "invalid email or password") {
-					errMsg = "Invalid email or password. Please try again."
-				} else if strings.Contains(errMsg, "too many failed attempts") {
-					errMsg = "Too many failed login attempts. Please try again later."
-				} else if strings.Contains(errMsg, "account is inactive") {
-					errMsg = "This account is inactive. Please contact support."
-				}
-				return authError{errors.New(errMsg)}
-			}
-
-			// Show success message
-			a.message = fmt.Sprintf("Login successful! Welcome, %s", username)
-
-			// Here you would typically transition to the main app view
-			// For now, we'll just show a success message
-			time.Sleep(2 * time.Second) // Show success message briefly
-
-			return token // Return the token on success
-		},
-	)
-}
-
-// handleSearch processes the search query and fetches results
-func (a *App) handleSearch() (tea.Model, tea.Cmd) {
-	query := strings.TrimSpace(a.searchInput.Value())
-	if query == "" {
-		a.setError("Please enter a search query.")
-		return a, nil
-	}
-
-	a.err = nil
-	a.isLoading = true
-
-	return a, tea.Batch(
-		a.spinner.Tick,
-		func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-
-			tok, err := a.authSvc.GetToken()
-			if err != nil {
-				return searchResultMsg{err: fmt.Errorf("not authenticated")}
-			}
-
-			oreillySvc, _ := oreilly.NewService()
-			resp, err := oreillySvc.SearchBooks(ctx, tok.AccessToken, query, 5)
-			if err != nil {
-				return searchResultMsg{err: err}
-			}
-
-			var lines []string
-			for i, r := range resp.Results {
-				lines = append(lines, fmt.Sprintf("%d. %s — %s", i+1, r.Title, r.Author))
-			}
-			return searchResultMsg{results: lines}
-		},
-	)
-}
-
-// Helper function to set an error message
-func (a *App) setError(msg string) {
-	a.err = fmt.Errorf("%s", msg)
-	a.isLoading = false
-}
-
-// Helper function to clear any error
-func (a *App) clearError() {
-	a.err = nil
-}
-
-// keys defines the key bindings for the application
-var keys = keyMap{
-	Quit: key.NewBinding(
-		key.WithKeys("q", "ctrl+c"),
-		key.WithHelp("q", "quit"),
-	),
-	Enter: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("enter", "select"),
-	),
-	Tab: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "switch field"),
-	),
-}
-
-type keyMap struct {
-	Quit  key.Binding
-	Enter key.Binding
-	Tab   key.Binding
-}
-
-// authError wraps an authentication error for the TUI
-type authError struct {
-	err error
-}
-
-type searchResultMsg struct {
-	results []string
-	err     error
-}
-
-// ForceMain transitions the UI directly to the main search screen, bypassing
-// the authentication instructions. Call this after verifying an existing
-// valid authentication token.
-func (a *App) ForceMain() {
-	a.current = "main"
-}
-
-// Error returns the error message
-func (a authError) Error() string {
-	return a.err.Error()
+	placeholder := lipgloss.NewStyle().Faint(true).
+		Render("Type a query and press Enter…")
+	return fmt.Sprintf("%s\n\n%s\n\n%s",
+		header, input, placeholder)
 }
