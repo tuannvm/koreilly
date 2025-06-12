@@ -19,18 +19,24 @@ import (
 // BookItem wraps a single search result and implements list.Item.
 type BookItem struct {
 	TitleText string
-	Author    string
-	Slug      string
 }
 
-func (b BookItem) Title() string       { return b.TitleText }
-func (b BookItem) Description() string { return b.Author }
+func (b BookItem) Title() string {
+	return b.TitleText
+}
+func (b BookItem) Description() string { return "" }
 func (b BookItem) FilterValue() string { return b.TitleText }
 
 // searchResultMsg carries items or an error from the async search.
 type searchResultMsg struct {
 	items []BookItem
 	err   error
+}
+
+// downloadRequestMsg is sent when the user selects a book to download.
+type downloadRequestMsg struct {
+	Slug  string
+	Title string
 }
 
 // App is the interactive search TUI model.
@@ -59,10 +65,11 @@ func NewApp(authSvc *auth.Service) *App {
 	a.spinner = spinner.New()
 	a.spinner.Spinner = spinner.Dot
 
-	// Interactive list
-	delegate := list.NewDefaultDelegate()
-	a.books = list.New(nil, delegate, 60, 12)
+	// Interactive list (use BookDelegate for always vertical scrolling)
+	delegate := BookDelegate{}
+	a.books = list.New(nil, delegate, 60, 10)
 	a.books.Title = "Results (↑/↓, Enter: select, Esc: search, q: quit)"
+	a.books.SetFilteringEnabled(false)
 
 	return a
 }
@@ -72,6 +79,7 @@ func (a *App) Init() tea.Cmd {
 	return tea.Batch(a.spinner.Tick, textinput.Blink)
 }
 
+// Add a Run method for compatibility with app.Run()
 func (a *App) Run() error {
 	p := tea.NewProgram(a, tea.WithAltScreen())
 	_, err := p.Run()
@@ -89,7 +97,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 
-		// If search results are displayed, route to list
+		// If list view is active, route keys to list
 		if a.inList {
 			booksModel, cmd := a.books.Update(msg)
 			a.books = booksModel
@@ -98,7 +106,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(msg, key.NewBinding(key.WithKeys("enter"))) {
 				if it, ok := a.books.SelectedItem().(BookItem); ok {
 					return a, func() tea.Msg {
-						return downloadRequestMsg{Slug: it.Slug, Title: it.TitleText}
+						return downloadRequestMsg{Title: it.TitleText}
 					}
 				}
 			}
@@ -131,7 +139,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				items := make([]BookItem, len(res.Results))
 				for i, r := range res.Results {
-					items[i] = BookItem{TitleText: r.Title, Author: r.Author, Slug: r.Slug}
+					items[i] = BookItem{
+						TitleText: r.Title,
+					}
 				}
 				return searchResultMsg{items, nil}
 			}
@@ -157,15 +167,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.inList = true
 		}
 		return a, nil
+
+	// Download requested (stub)
+	case downloadRequestMsg:
+		a.err = fmt.Errorf("Download requested: %s", msg.Title)
+		return a, nil
 	}
 
 	return a, nil
-}
-
-// downloadRequestMsg is sent when a book is chosen.
-type downloadRequestMsg struct {
-	Slug  string
-	Title string
 }
 
 // View renders the TUI based on current state.
